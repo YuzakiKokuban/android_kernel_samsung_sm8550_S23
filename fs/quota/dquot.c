@@ -271,7 +271,6 @@ static int __dquot_initialize(struct inode *inode, int type);
 
 static void quota_release_workfn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(quota_release_work, quota_release_workfn);
-static struct workqueue_struct *quota_release_wq;
 
 static inline unsigned int
 hashfn(const struct super_block *sb, struct kqid qid)
@@ -691,6 +690,8 @@ int dquot_writeback_dquots(struct super_block *sb, int type)
 
 	WARN_ON_ONCE(!rwsem_is_locked(&sb->s_umount));
 
+	flush_delayed_work(&quota_release_work);
+
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 		if (type != -1 && cnt != type)
 			continue;
@@ -891,7 +892,7 @@ void dqput(struct dquot *dquot)
 	put_releasing_dquots(dquot);
 	atomic_dec(&dquot->dq_count);
 	spin_unlock(&dq_list_lock);
-	queue_delayed_work(quota_release_wq, &quota_release_work, 1);
+	queue_delayed_work(system_unbound_wq, &quota_release_work, 1);
 }
 EXPORT_SYMBOL(dqput);
 
@@ -996,9 +997,8 @@ we_slept:
 	 * smp_mb__before_atomic() in dquot_acquire().
 	 */
 	smp_rmb();
-#ifdef CONFIG_QUOTA_DEBUG
-	BUG_ON(!dquot->dq_sb);	/* Has somebody invalidated entry under us? */
-#endif
+	/* Has somebody invalidated entry under us? */
+	WARN_ON_ONCE(hlist_unhashed(&dquot->dq_hash));
 out:
 	if (empty)
 		do_destroy_dquot(empty);
@@ -3035,11 +3035,6 @@ static int __init dquot_init(void)
 			(SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT|
 				SLAB_MEM_SPREAD|SLAB_PANIC),
 			NULL);
-
-	quota_release_wq = alloc_workqueue("quota_release_wq",
-				WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
-	if (!quota_release_wq)
-		panic("Cannot create quota_release workqueue");
 
 	order = 0;
 	dquot_hash = (struct hlist_head *)__get_free_pages(GFP_KERNEL, order);

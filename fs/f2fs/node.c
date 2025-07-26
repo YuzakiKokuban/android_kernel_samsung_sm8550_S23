@@ -749,21 +749,6 @@ got:
 	return level;
 }
 
-#ifdef CONFIG_F2FS_SEC_SUPPORT_DNODE_RELOCATION
-/* It should grab and release a write lock by self when it needs */
-static void __lock_dnode(struct dnode_of_data *dn, bool lock)
-{
-	if (!dn->for_dnode_relocation) {
-		if (lock)
-			f2fs_down_read(&F2FS_I(dn->inode)->i_dnode_sem);
-		else
-			f2fs_up_read(&F2FS_I(dn->inode)->i_dnode_sem);
-	}
-}
-#else
-static void __lock_dnode(struct dnode_of_data *dn, bool lock) {}
-#endif
-
 /*
  * Caller should call f2fs_put_dnode(dn).
  * Also, it should grab and release a rwsem by calling f2fs_lock_op() and
@@ -780,22 +765,17 @@ int f2fs_get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int mode)
 	int level, i = 0;
 	int err = 0;
 
-	__lock_dnode(dn, true);
 	level = get_node_path(dn->inode, index, offset, noffset);
-	if (level < 0) {
-		__lock_dnode(dn, false);
+	if (level < 0)
 		return level;
-	}
 
 	nids[0] = dn->inode->i_ino;
 	npage[0] = dn->inode_page;
 
 	if (!npage[0]) {
 		npage[0] = f2fs_get_node_page(sbi, nids[0]);
-		if (IS_ERR(npage[0])) {
-			__lock_dnode(dn, false);
+		if (IS_ERR(npage[0]))
 			return PTR_ERR(npage[0]);
-		}
 	}
 
 	/* if inline_data is set, should not report any block indices */
@@ -885,7 +865,6 @@ int f2fs_get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int mode)
 					c_len);
 	}
 out:
-	__lock_dnode(dn, false);
 	return 0;
 
 release_pages:
@@ -900,7 +879,6 @@ release_out:
 		dn->max_level = level;
 		dn->ofs_in_node = offset[level];
 	}
-	__lock_dnode(dn, false);
 	return err;
 }
 
@@ -1124,7 +1102,14 @@ int f2fs_truncate_inode_blocks(struct inode *inode, pgoff_t from)
 	trace_f2fs_truncate_inode_blocks_enter(inode, from);
 
 	level = get_node_path(inode, from, offset, noffset);
-	if (level < 0) {
+	if (level <= 0) {
+		if (!level) {
+			level = -EFSCORRUPTED;
+			f2fs_err(sbi, "%s: inode ino=%lx has corrupted node block, from:%lu addrs:%u",
+					__func__, inode->i_ino,
+					from, ADDRS_PER_INODE(inode));
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+		}
 		trace_f2fs_truncate_inode_blocks_exit(inode, level);
 		return level;
 	}
@@ -1319,6 +1304,7 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	}
 	if (unlikely(new_ni.blk_addr != NULL_ADDR)) {
 		err = -EFSCORRUPTED;
+		dec_valid_node_count(sbi, dn->inode, !ofs);
 		set_sbi_flag(sbi, SBI_NEED_FSCK);
 		f2fs_handle_error(sbi, ERROR_INVALID_BLKADDR);
 		goto fail;
@@ -1339,18 +1325,12 @@ struct page *f2fs_new_node_page(struct dnode_of_data *dn, unsigned int ofs)
 	if (set_page_dirty(page))
 		dn->node_changed = true;
 
-	if (f2fs_is_fua_write(dn->inode))
-		set_page_private_fua(page);
-	else
-		clear_page_private_fua(page);
-
 	if (f2fs_has_xattr_block(ofs))
 		f2fs_i_xnid_write(dn->inode, dn->nid);
 
 	if (ofs == 0)
 		inc_valid_inode_count(sbi);
 	return page;
-
 fail:
 	clear_node_page_dirty(page);
 	f2fs_put_page(page, 1);
@@ -1390,27 +1370,17 @@ static int read_node_page(struct page *page, int op_flags)
 
 	/* NEW_ADDR can be seen, after cp_error drops some dirty node pages */
 	if (unlikely(ni.blk_addr == NULL_ADDR || ni.blk_addr == NEW_ADDR)) {
-		if (ni.blk_addr == NULL_ADDR)
-			printk_ratelimited(KERN_ERR "F2FS-fs: Node block address is NULL, nid: %lu, ino: %lu, blkaddr: %lu, version: %u, flag: 0x%x\n",
-					(unsigned long) ni.nid, (unsigned long) ni.ino,
-					(unsigned long) ni.blk_addr, (unsigned int) ni.version,
-					(unsigned int) ni.flag);
 		ClearPageUptodate(page);
 		return -ENOENT;
 	}
 
 	fio.new_blkaddr = fio.old_blkaddr = ni.blk_addr;
-	if (op_flags & F2FS_REQ_DEFKEY_BYPASS)
-		f2fs_warn(sbi, "inconsistent node lower block, nid: %lu, ino: %lu, blk_addr: %lu",
-				(unsigned long) ni.nid, (unsigned long) ni.ino,
-				(unsigned long) ni.blk_addr);
 
 	err = f2fs_submit_page_bio(&fio);
 
-	if (!err) {
+	if (!err)
 		f2fs_update_iostat(sbi, FS_NODE_READ_IO, F2FS_BLKSIZE);
-		clear_page_private_fua(page);
-	}
+
 	return err;
 }
 
@@ -1439,35 +1409,6 @@ void f2fs_ra_node_page(struct f2fs_sb_info *sbi, nid_t nid)
 	f2fs_put_page(apage, err ? 1 : 0);
 }
 
-/*
- * If Metadata encryption enabled, there is no way to check
- * which pattern the node page is damaged by.
- * Such as Deadmark, old block, or column corrution.
- * Therefore, print the on-disk block that skips dm-default-key decryption.
- */
-static void f2fs_print_lower_node(struct f2fs_sb_info *sbi, struct page *page)
-{
-	int err;
-
-	if (MAJOR(sbi->sb->s_dev) == SCSI_DISK0_MAJOR ||
-			MAJOR(sbi->sb->s_dev) == MMC_BLOCK_MAJOR)
-		return;
-	ClearPageUptodate(page);
-
-	/*
-	 * Handling to PAGE_LOCKED is unnecessary
-	 * because it explicitly clears page uptodate.
-	 */
-	err = read_node_page(page, F2FS_REQ_DEFKEY_BYPASS);
-	if (err < 0)
-		return;
-
-	lock_page(page);
-	if (PageUptodate(page)) {
-		f2fs_warn(sbi, "Print lower nid block");
-		print_block_data(sbi->sb, page->index, page_address(page), 0, F2FS_BLKSIZE);
-	}
-}
 static struct page *__get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid,
 					struct page *parent, int start)
 {
@@ -1521,11 +1462,6 @@ page_hit:
 	set_sbi_flag(sbi, SBI_NEED_FSCK);
 	err = -EINVAL;
 out_err:
-	if (PageUptodate(page)) {
-		print_block_data(sbi->sb, nid, page_address(page), 0, F2FS_BLKSIZE);
-		f2fs_print_lower_node(sbi, page);
-		f2fs_bug_on(sbi, 1);
-	}
 	ClearPageUptodate(page);
 out_put_err:
 	/* ENOENT comes from read_node_page which is not an error. */
@@ -1660,8 +1596,6 @@ static int __write_node_page(struct page *page, bool atomic, bool *submitted,
 		.io_wbc = wbc,
 	};
 	unsigned int seq;
-
-	f2fs_cond_set_fua(&fio);
 
 	trace_f2fs_writepage(page, NODE);
 
@@ -2176,12 +2110,6 @@ static int f2fs_write_node_pages(struct address_space *mapping,
 	if (unlikely(is_sbi_flag_set(sbi, SBI_POR_DOING)))
 		goto skip_write;
 
-	/* W/A - prevent panic while shutdown */
-	if (unlikely(ignore_fs_panic)) {
-		//pr_err("%s: Ignore panic\n", __func__);
-		return -EIO;
-	}
-
 	/* balancing f2fs's metadata in background */
 	f2fs_balance_fs_bg(sbi, true);
 
@@ -2228,7 +2156,8 @@ static int f2fs_set_node_page_dirty(struct page *page)
 	if (IS_INODE(page))
 		f2fs_inode_chksum_set(F2FS_P_SB(page), page);
 #endif
-	if (__set_page_dirty_nobuffers(page)) {
+	if (!PageDirty(page)) {
+		__set_page_dirty_nobuffers(page);
 		inc_page_count(F2FS_P_SB(page), F2FS_DIRTY_NODES);
 		set_page_private_reference(page);
 		return 1;
@@ -2458,11 +2387,8 @@ static int scan_nat_page(struct f2fs_sb_info *sbi,
 
 		blk_addr = le32_to_cpu(nat_blk->entries[i].block_addr);
 
-		if (blk_addr == NEW_ADDR) {
-			print_block_data(sbi->sb, current_nat_addr(sbi, start_nid),
-				page_address(nat_page), 0, F2FS_BLKSIZE);
+		if (blk_addr == NEW_ADDR)
 			return -EINVAL;
-		}
 
 		if (blk_addr == NULL_ADDR) {
 			add_free_nid(sbi, start_nid, true, true);
@@ -2616,30 +2542,6 @@ int f2fs_build_free_nids(struct f2fs_sb_info *sbi, bool sync, bool mount)
 }
 
 /*
- * f2fs_has_free_inodes()
- * @sbi: in-core super block structure.
- *
- * Check if filesystem has inodes available for allocation.
- * On success return 1, return 0 on failure.
- */
-static inline bool f2fs_has_free_inodes(struct f2fs_sb_info *sbi)
-{
-	struct f2fs_nm_info *nm_i = NM_I(sbi);
-
-#define F2FS_DEF_RESERVE_INODE 8192
-	if (likely(nm_i->available_nids > F2FS_DEF_RESERVE_INODE))
-		return true;
-
-	/* Hm, nope.  Are (enough) root reserved inodes available? */
-	if (uid_eq(F2FS_OPTION(sbi).s_resuid, current_fsuid()) ||
-			(!gid_eq(F2FS_OPTION(sbi).s_resgid, GLOBAL_ROOT_GID) &&
-			 in_group_p(F2FS_OPTION(sbi).s_resgid)) ||
-			capable(CAP_SYS_RESOURCE))
-		return true;
-	return false;
-}
-
-/*
  * If this function returns success, caller can obtain a new nid
  * from second parameter of this function.
  * The returned nid could be used ino as well as nid when inode is created.
@@ -2656,8 +2558,7 @@ retry:
 
 	spin_lock(&nm_i->nid_list_lock);
 
-	if (unlikely(nm_i->available_nids == 0)
-			|| f2fs_has_free_inodes(sbi) == 0) {
+	if (unlikely(nm_i->available_nids == 0)) {
 		spin_unlock(&nm_i->nid_list_lock);
 		return false;
 	}

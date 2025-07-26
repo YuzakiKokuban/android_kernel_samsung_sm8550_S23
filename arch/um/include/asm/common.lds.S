@@ -52,10 +52,6 @@
 	CON_INITCALL
   }
 
-  .kunit_test_suites : {
-	KUNIT_TABLE()
-  }
-
   .exitcall : {
 	__exitcall_begin = .;
 	*(.exitcall.exit)

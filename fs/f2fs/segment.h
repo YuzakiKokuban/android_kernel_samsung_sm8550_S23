@@ -304,9 +304,6 @@ struct dirty_seglist_info {
 	unsigned long *pinned_secmap;		/* pinned victims from foreground GC */
 	unsigned int pinned_secmap_cnt;		/* count of victims which has pinned data */
 	bool enable_pin_section;		/* enable pinning section */
-
-	/* W/A for FG_GC failure due to Atomic Write File and Pinned File */
-	unsigned long *unable_victim_secmap; /* GC Failed Bitmap */
 };
 
 /* victim selection function for cleaning and SSR */
@@ -638,11 +635,29 @@ static inline bool has_not_enough_free_secs(struct f2fs_sb_info *sbi,
 	return !has_curseg_enough_space(sbi, node_blocks, dent_blocks);
 }
 
+static inline bool has_enough_free_blks(struct f2fs_sb_info *sbi)
+{
+	unsigned int total_free_blocks = 0;
+	unsigned int avail_user_block_count;
+
+	spin_lock(&sbi->stat_lock);
+
+	avail_user_block_count = get_available_block_count(sbi, NULL, true);
+	total_free_blocks = avail_user_block_count - (unsigned int)valid_user_blocks(sbi);
+
+	spin_unlock(&sbi->stat_lock);
+
+	return total_free_blocks > 0;
+}
+
 static inline bool f2fs_is_checkpoint_ready(struct f2fs_sb_info *sbi)
 {
 	if (likely(!is_sbi_flag_set(sbi, SBI_CP_DISABLED)))
 		return true;
 	if (likely(!has_not_enough_free_secs(sbi, 0, 0)))
+		return true;
+	if (!f2fs_lfs_mode(sbi) &&
+		likely(has_enough_free_blks(sbi)))
 		return true;
 	return false;
 }
@@ -679,9 +694,6 @@ static inline int utilization(struct f2fs_sb_info *sbi)
 #define DEF_MIN_IPU_UTIL	70
 #define DEF_MIN_FSYNC_BLOCKS	8
 #define DEF_MIN_HOT_BLOCKS	16
-
-#define DEF_DISCARD_SLAB_THRESHOLD (4)		/* 4MB */
-#define DEF_UNDISCARD_THRESHOLD (128)		/* 128MB */
 
 #define SMALL_VOLUME_SEGMENTS	(16 * 512)	/* 16GB */
 

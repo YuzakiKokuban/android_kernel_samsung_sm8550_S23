@@ -82,7 +82,7 @@
 
 		sleep_clk: sleep-clk {
 			compatible = "fixed-clock";
-			clock-frequency = <32768>;
+			clock-frequency = <32764>;
 			#clock-cells = <0>;
 		};
 	};
@@ -1758,6 +1758,8 @@
 			resets = <&ufs_mem_hc 0>;
 			reset-names = "ufsphy";
 			status = "disabled";
+
+			power-domains = <&gcc UFS_PHY_GDSC>;
 
 			ufs_mem_phy_lanes: phy@1d87400 {
 				reg = <0 0x01d87400 0 0x16c>,

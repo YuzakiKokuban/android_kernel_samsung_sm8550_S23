@@ -85,6 +85,10 @@ static struct vfsmount *shm_mnt;
 
 #include "internal.h"
 
+#ifdef CONFIG_MEMFD_ASHMEM_SHIM
+#include "memfd-ashmem-shim.h"
+#endif
+
 #define BLOCKS_PER_PAGE  (PAGE_SIZE/512)
 #define VM_ACCT(size)    (PAGE_ALIGN(size) >> PAGE_SHIFT)
 
@@ -749,8 +753,6 @@ next:
 		mapping->nrpages += nr;
 		__mod_lruvec_page_state(page, NR_FILE_PAGES, nr);
 		__mod_lruvec_page_state(page, NR_SHMEM, nr);
-		if (is_gpu_page(page))
-			total_kgsl_shmem_pages_add(nr);
 unlock:
 		xas_unlock_irq(&xas);
 	} while (xas_nomem(&xas, gfp));
@@ -779,10 +781,7 @@ static void shmem_delete_from_page_cache(struct page *page, void *radswap)
 
 	xa_lock_irq(&mapping->i_pages);
 	error = shmem_replace_entry(mapping, page->index, page, radswap);
-	if (!is_gpu_page(page))
-		page->mapping = NULL;
-	else
-		total_kgsl_shmem_pages_dec();
+	page->mapping = NULL;
 	mapping->nrpages--;
 	__dec_lruvec_page_state(page, NR_FILE_PAGES);
 	__dec_lruvec_page_state(page, NR_SHMEM);
@@ -1060,8 +1059,6 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 
 	spin_lock_irq(&info->lock);
 	info->swapped -= nr_swaps_freed;
-	if (is_gpu_mapping(mapping))
-		total_kgsl_reclaimed_pages_sub(nr_swaps_freed);
 	shmem_recalc_inode(inode);
 	spin_unlock_irq(&info->lock);
 }
@@ -1446,8 +1443,6 @@ static int shmem_writepage(struct page *page, struct writeback_control *wbc)
 		spin_lock_irq(&info->lock);
 		shmem_recalc_inode(inode);
 		info->swapped++;
-		if (is_gpu_page(page))
-			total_kgsl_reclaimed_pages_inc();
 		spin_unlock_irq(&info->lock);
 
 		swap_shmem_alloc(swap);
@@ -1788,8 +1783,6 @@ static int shmem_swapin_page(struct inode *inode, pgoff_t index,
 
 	spin_lock_irq(&info->lock);
 	info->swapped--;
-	if (is_gpu_page(page))
-		total_kgsl_reclaimed_pages_dec();
 	shmem_recalc_inode(inode);
 	spin_unlock_irq(&info->lock);
 
@@ -2278,9 +2271,6 @@ static int shmem_mmap(struct file *file, struct vm_area_struct *vma)
 	ret = seal_check_future_write(info->seals, vma);
 	if (ret)
 		return ret;
-
-	/* arm64 - allow memory tagging on RAM-based files */
-	vma->vm_flags |= VM_MTE_ALLOWED;
 
 	file_accessed(file);
 	vma->vm_ops = &shmem_vm_ops;
@@ -3871,6 +3861,12 @@ static const struct file_operations shmem_file_operations = {
 	.splice_read	= generic_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.fallocate	= shmem_fallocate,
+#endif
+#ifdef CONFIG_MEMFD_ASHMEM_SHIM
+	.unlocked_ioctl	= memfd_ashmem_shim_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= memfd_ashmem_shim_compat_ioctl,
+#endif
 #endif
 };
 

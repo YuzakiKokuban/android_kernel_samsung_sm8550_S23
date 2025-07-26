@@ -122,13 +122,6 @@ static inline unsigned long zone_page_state(struct zone *zone,
 	return x;
 }
 
-static inline unsigned long zone_available_simple(struct zone *zone)
-{
-	return zone_page_state(zone, NR_FREE_PAGES)
-		+ zone_page_state(zone, NR_ZONE_INACTIVE_FILE)
-		+ zone_page_state(zone, NR_ZONE_ACTIVE_FILE);
-}
-
 /*
  * More accurate version that also considers the currently pending
  * deltas. For that we need to loop over all cpus to find the current
@@ -361,7 +354,7 @@ static inline const char *node_stat_name(enum node_stat_item item)
 
 static inline const char *lru_list_name(enum lru_list lru)
 {
-	return node_stat_name(NR_LRU_BASE + lru) + 3; // skip "nr_"
+	return node_stat_name(NR_LRU_BASE + (enum node_stat_item)lru) + 3; // skip "nr_"
 }
 
 static inline const char *writeback_stat_name(enum writeback_stat_item item)

@@ -21,7 +21,6 @@
 #endif
 
 #define BIO_MAX_VECS		256U
-#define BIO_MAX_BYTES		(BIO_MAX_VECS * PAGE_SIZE)
 
 static inline unsigned int bio_max_segs(unsigned int nr_segs)
 {
@@ -117,7 +116,7 @@ static inline bool bio_full(struct bio *bio, unsigned len)
 	if (bio->bi_vcnt >= bio->bi_max_vecs)
 		return true;
 
-	if (bio->bi_iter.bi_size > BIO_MAX_BYTES - len)
+	if (bio->bi_iter.bi_size > UINT_MAX - len)
 		return true;
 
 	return false;

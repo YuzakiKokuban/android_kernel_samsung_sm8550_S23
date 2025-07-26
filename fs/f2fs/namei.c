@@ -14,7 +14,6 @@
 #include <linux/dcache.h>
 #include <linux/namei.h>
 #include <linux/quotaops.h>
-#include <linux/iversion.h>
 
 #include "f2fs.h"
 #include "node.h"
@@ -52,9 +51,6 @@ static struct inode *f2fs_new_inode(struct user_namespace *mnt_userns,
 
 	inode->i_ino = ino;
 	inode->i_blocks = 0;
-
-	inode_inc_iversion(inode);
-
 	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
 	F2FS_I(inode)->i_crtime = inode->i_mtime;
 	inode->i_generation = prandom_u32();
@@ -342,39 +338,6 @@ static void set_compress_inode(struct f2fs_sb_info *sbi, struct inode *inode,
 	}
 }
 
-#ifdef CONFIG_F2FS_ML_BASED_STREAM_SEPARATION
-static void update_ml_stream_info(struct inode *inode, struct inode *dir,
-			struct dentry *dentry)
-{
-//dentry -> me, dir -> parent
-
-#ifdef CONFIG_F2FS_ML_STREAMID_FORCE_COLD
-	if (S_ISREG(inode->i_mode)) {
-		if (is_extension_exist(dentry->d_name.name, "exo", true))
-			F2FS_I(inode)->is_force_cold = 1;
-	}
-#endif
-	if (F2FS_I(dir)->is_cache == 1) {
-		F2FS_I(inode)->is_cache = 1;
-		return;
-	}
-	if (strlen("cache") == dentry->d_parent->d_name.len) {
-		if (!strcmp(dentry->d_parent->d_name.name, "cache")) {
-			F2FS_I(inode)->is_cache = 1;
-			F2FS_I(dir)->is_cache = 1;
-			return;
-		}
-	}
-	if (S_ISDIR(inode->i_mode)) {
-		if (strlen("cache") == dentry->d_name.len && !strcmp(dentry->d_name.name, "cache")) {
-			F2FS_I(inode)->is_cache = 1;
-			return;
-		}
-	}
-	F2FS_I(inode)->is_cache = 0;
-}
-#endif
-
 static int f2fs_create(struct user_namespace *mnt_userns, struct inode *dir,
 		       struct dentry *dentry, umode_t mode, bool excl)
 {
@@ -396,9 +359,6 @@ static int f2fs_create(struct user_namespace *mnt_userns, struct inode *dir,
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
-#ifdef CONFIG_F2FS_ML_BASED_STREAM_SEPARATION
-	update_ml_stream_info(inode, dir, dentry);
-#endif
 	if (!test_opt(sbi, DISABLE_EXT_IDENTIFY))
 		set_file_temperature(sbi, inode, dentry->d_name.name);
 
@@ -447,7 +407,7 @@ static int f2fs_link(struct dentry *old_dentry, struct inode *dir,
 
 	if (is_inode_flag_set(dir, FI_PROJ_INHERIT) &&
 			(!projid_eq(F2FS_I(dir)->i_projid,
-			F2FS_I(old_dentry->d_inode)->i_projid)))
+			F2FS_I(inode)->i_projid)))
 		return -EXDEV;
 
 	err = f2fs_dquot_initialize(dir);
@@ -491,63 +451,6 @@ struct dentry *f2fs_get_parent(struct dentry *child)
 	return d_obtain_alias(f2fs_iget(child->d_sb, ino));
 }
 
-static int __recover_dot_dentries(struct inode *dir, nid_t pino)
-{
-	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
-	struct qstr dot = QSTR_INIT(".", 1);
-	struct qstr dotdot = QSTR_INIT("..", 2);
-	struct f2fs_dir_entry *de;
-	struct page *page;
-	int err = 0;
-
-	if (f2fs_readonly(sbi->sb)) {
-		f2fs_info(sbi, "skip recovering inline_dots inode (ino:%lu, pino:%u) in readonly mountpoint",
-			  dir->i_ino, pino);
-		return 0;
-	}
-
-	if (!S_ISDIR(dir->i_mode)) {
-		f2fs_err(sbi, "inconsistent inode status, skip recovering inline_dots inode (ino:%lu, i_mode:%u, pino:%u)",
-			  dir->i_ino, dir->i_mode, pino);
-		set_sbi_flag(sbi, SBI_NEED_FSCK);
-		return -ENOTDIR;
-	}
-
-	err = f2fs_dquot_initialize(dir);
-	if (err)
-		return err;
-
-	f2fs_balance_fs(sbi, true);
-
-	f2fs_lock_op(sbi);
-
-	de = f2fs_find_entry(dir, &dot, &page);
-	if (de) {
-		f2fs_put_page(page, 0);
-	} else if (IS_ERR(page)) {
-		err = PTR_ERR(page);
-		goto out;
-	} else {
-		err = f2fs_do_add_link(dir, &dot, NULL, dir->i_ino, S_IFDIR);
-		if (err)
-			goto out;
-	}
-
-	de = f2fs_find_entry(dir, &dotdot, &page);
-	if (de)
-		f2fs_put_page(page, 0);
-	else if (IS_ERR(page))
-		err = PTR_ERR(page);
-	else
-		err = f2fs_do_add_link(dir, &dotdot, NULL, pino, S_IFDIR);
-out:
-	if (!err)
-		clear_inode_flag(dir, FI_INLINE_DOTS);
-
-	f2fs_unlock_op(sbi);
-	return err;
-}
-
 static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 		unsigned int flags)
 {
@@ -557,7 +460,6 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 	struct dentry *new;
 	nid_t ino = -1;
 	int err = 0;
-	unsigned int root_ino = F2FS_ROOT_INO(F2FS_I_SB(dir));
 	struct f2fs_filename fname;
 
 	trace_f2fs_lookup_start(dir, dentry, flags);
@@ -586,35 +488,14 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 	}
 
 	ino = le32_to_cpu(de->ino);
+	f2fs_put_page(page, 0);
 
 	inode = f2fs_iget(dir->i_sb, ino);
 	if (IS_ERR(inode)) {
-		if (PTR_ERR(inode) != -ENOMEM) {
-			struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
-
-			printk_ratelimited(KERN_ERR "F2FS-fs: Invalid inode referenced: %u, "
-					"at parent inode: %lu, err: %ld\n", ino, dir->i_ino, PTR_ERR(inode));
-			print_block_data(sbi->sb, page->index,
-					page_address(page), 0, F2FS_BLKSIZE);
-			f2fs_bug_on(sbi, 1);
-		}
-		f2fs_put_page(page, 0);
 		err = PTR_ERR(inode);
 		goto out;
 	}
-	f2fs_put_page(page, 0);
 
-	if ((dir->i_ino == root_ino) && f2fs_has_inline_dots(dir)) {
-		err = __recover_dot_dentries(dir, root_ino);
-		if (err)
-			goto out_iput;
-	}
-
-	if (f2fs_has_inline_dots(inode)) {
-		err = __recover_dot_dentries(inode, dir->i_ino);
-		if (err)
-			goto out_iput;
-	}
 	if (IS_ENCRYPTED(dir) &&
 	    (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode)) &&
 	    !fscrypt_has_permitted_context(dir, inode)) {
@@ -623,9 +504,6 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 		err = -EPERM;
 		goto out_iput;
 	}
-#ifdef CONFIG_F2FS_ML_BASED_STREAM_SEPARATION
-	update_ml_stream_info(inode, dir, dentry);
-#endif
 out_splice:
 #ifdef CONFIG_UNICODE
 	if (!inode && IS_CASEFOLDED(dir)) {
@@ -675,6 +553,15 @@ static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
 	if (!de) {
 		if (IS_ERR(page))
 			err = PTR_ERR(page);
+		goto fail;
+	}
+
+	if (unlikely(inode->i_nlink == 0)) {
+		f2fs_warn(F2FS_I_SB(inode), "%s: inode (ino=%lx) has zero i_nlink",
+			  __func__, inode->i_ino);
+		err = -EFSCORRUPTED;
+		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
+		f2fs_put_page(page, 0);
 		goto fail;
 	}
 
@@ -820,9 +707,6 @@ static int f2fs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
-#ifdef CONFIG_F2FS_ML_BASED_STREAM_SEPARATION
-	update_ml_stream_info(inode, dir, dentry);
-#endif
 	inode->i_op = &f2fs_dir_inode_operations;
 	inode->i_fop = &f2fs_dir_operations;
 	inode->i_mapping->a_ops = &f2fs_dblock_aops;
@@ -1024,12 +908,12 @@ static int f2fs_rename(struct user_namespace *mnt_userns, struct inode *old_dir,
 
 	if (is_inode_flag_set(new_dir, FI_PROJ_INHERIT) &&
 			(!projid_eq(F2FS_I(new_dir)->i_projid,
-			F2FS_I(old_dentry->d_inode)->i_projid)))
+			F2FS_I(old_inode)->i_projid)))
 		return -EXDEV;
 
 	/*
 	 * If new_inode is null, the below renaming flow will
-	 * add a link in old_dir which can conver inline_dir.
+	 * add a link in old_dir which can convert inline_dir.
 	 * After then, if we failed to get the entry due to other
 	 * reasons like ENOMEM, we had to remove the new entry.
 	 * Instead of adding such the error handling routine, let's
@@ -1213,10 +1097,10 @@ static int f2fs_cross_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	if ((is_inode_flag_set(new_dir, FI_PROJ_INHERIT) &&
 			!projid_eq(F2FS_I(new_dir)->i_projid,
-			F2FS_I(old_dentry->d_inode)->i_projid)) ||
-	    (is_inode_flag_set(new_dir, FI_PROJ_INHERIT) &&
+			F2FS_I(old_inode)->i_projid)) ||
+	    (is_inode_flag_set(old_dir, FI_PROJ_INHERIT) &&
 			!projid_eq(F2FS_I(old_dir)->i_projid,
-			F2FS_I(new_dentry->d_inode)->i_projid)))
+			F2FS_I(new_inode)->i_projid)))
 		return -EXDEV;
 
 	err = f2fs_dquot_initialize(old_dir);

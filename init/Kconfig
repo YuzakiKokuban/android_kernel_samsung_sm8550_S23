@@ -674,7 +674,7 @@ endmenu # "CPU/Task time and stats accounting"
 
 config CPU_ISOLATION
 	bool "CPU isolation"
-	depends on SMP || COMPILE_TEST
+	depends on SMP
 	default y
 	help
 	  Make sure that CPUs running critical tasks are not disturbed by
@@ -955,11 +955,6 @@ config MEMCG
 config MEMCG_SWAP
 	bool
 	depends on MEMCG && SWAP
-	default y
-
-config MEMCG_FORCE_USE_VM_SWAPPINESS
-	bool "Force to use vm_swappiness instead of memcg->swappiness"
-	depends on MEMCG_SWAP
 	default y
 
 config MEMCG_KMEM
@@ -2430,4 +2425,3 @@ config ARCH_HAS_SYSCALL_WRAPPER
 	def_bool n
 
 source "init/Kconfig.gki"
-source "init/Kconfig.gki-debug"

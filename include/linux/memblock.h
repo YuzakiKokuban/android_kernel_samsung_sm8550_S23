@@ -442,18 +442,6 @@ static inline void *memblock_alloc_node(phys_addr_t size,
 				      MEMBLOCK_ALLOC_ACCESSIBLE, nid);
 }
 
-static inline void memblock_free_early(phys_addr_t base,
-					      phys_addr_t size)
-{
-	memblock_free(base, size);
-}
-
-static inline void memblock_free_early_nid(phys_addr_t base,
-						  phys_addr_t size, int nid)
-{
-	memblock_free(base, size);
-}
-
 static inline void memblock_free_late(phys_addr_t base, phys_addr_t size)
 {
 	__memblock_free_late(base, size);
@@ -606,27 +594,6 @@ static inline void early_memtest(phys_addr_t start, phys_addr_t end)
 }
 #endif
 
-#ifdef CONFIG_MEMBLOCK_MEMSIZE
-extern void memblock_memsize_record(const char *name, phys_addr_t base,
-				    phys_addr_t size, bool nomap,
-				    bool reusable);
-extern void memblock_memsize_detect_hole(void);
-extern void memblock_memsize_set_name(const char *name);
-extern void memblock_memsize_unset_name(void);
-extern void memblock_memsize_enable_tracking(void);
-extern void memblock_memsize_disable_tracking(void);
-extern void memblock_memsize_mod_kernel_size(long size);
-#else
-static inline void memblock_memsize_record(const char *name, phys_addr_t base,
-				    phys_addr_t size, bool nomap,
-				    bool reusable) { }
-static inline void memblock_memsize_detect_hole(void) { }
-static inline void memblock_memsize_set_name(const char *name) { }
-static inline void memblock_memsize_unset_name(void) { }
-static inline void memblock_memsize_enable_tracking(void){ }
-static inline void memblock_memsize_disable_tracking(void){ }
-static inline void memblock_memsize_mod_kernel_size(long size) { }
-#endif
 #endif /* __KERNEL__ */
 
 #endif /* _LINUX_MEMBLOCK_H */

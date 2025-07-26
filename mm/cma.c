@@ -178,7 +178,6 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 				 struct cma **res_cma)
 {
 	struct cma *cma;
-	phys_addr_t alignment;
 
 	/* Sanity checks */
 	if (cma_area_count == ARRAY_SIZE(cma_areas)) {
@@ -190,14 +189,7 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 		return -EINVAL;
 
 	/* ensure minimal alignment required by mm core */
-	alignment = PAGE_SIZE <<
-			max_t(unsigned long, MAX_ORDER - 1, pageblock_order);
-
-	/* alignment should be aligned with order_per_bit */
-	if (!IS_ALIGNED(alignment >> PAGE_SHIFT, 1 << order_per_bit))
-		return -EINVAL;
-
-	if (ALIGN(base, alignment) != base || ALIGN(size, alignment) != size)
+	if (!IS_ALIGNED(base | size, CMA_MIN_ALIGNMENT_BYTES))
 		return -EINVAL;
 
 	/*
@@ -272,14 +264,8 @@ int __init cma_declare_contiguous_nid(phys_addr_t base,
 	if (alignment && !is_power_of_2(alignment))
 		return -EINVAL;
 
-	/*
-	 * Sanitise input arguments.
-	 * Pages both ends in CMA area could be merged into adjacent unmovable
-	 * migratetype page by page allocator's buddy algorithm. In the case,
-	 * you couldn't get a contiguous memory, which is not what we want.
-	 */
-	alignment = max(alignment,  (phys_addr_t)PAGE_SIZE <<
-			  max_t(unsigned long, MAX_ORDER - 1, pageblock_order));
+	/* Sanitise input arguments. */
+	alignment = max_t(phys_addr_t, alignment, CMA_MIN_ALIGNMENT_BYTES);
 	if (fixed && base & (alignment - 1)) {
 		ret = -EINVAL;
 		pr_err("Region at %pa must be aligned to %pa bytes\n",
@@ -394,6 +380,7 @@ err:
 	return ret;
 }
 
+#ifdef CONFIG_CMA_DEBUG
 static void cma_debug_show_areas(struct cma *cma)
 {
 	unsigned long next_zero_bit, next_set_bit, nr_zero;
@@ -418,6 +405,9 @@ static void cma_debug_show_areas(struct cma *cma)
 	pr_cont("=> %lu free of %lu total pages\n", nr_total, cma->count);
 	spin_unlock_irq(&cma->lock);
 }
+#else
+static inline void cma_debug_show_areas(struct cma *cma) { }
+#endif
 
 /**
  * cma_alloc() - allocate pages from contiguous area
@@ -440,7 +430,7 @@ struct page *cma_alloc(struct cma *cma, unsigned long count,
 	struct page *page = NULL;
 	int ret = -ENOMEM;
 	int num_attempts = 0;
-	int max_retries = 10;
+	int max_retries = 5;
 	bool bypass = false;
 
 	trace_android_vh_cma_alloc_bypass(cma, count, align, no_warn,

@@ -60,7 +60,7 @@ static struct hns3_dbg_cmd_info hns3_dbg_cmd[] = {
 		.name = "tm_qset",
 		.cmd = HNAE3_DBG_CMD_TM_QSET,
 		.dentry = HNS3_DBG_DENTRY_TM,
-		.buf_len = HNS3_DBG_READ_LEN,
+		.buf_len = HNS3_DBG_READ_LEN_1MB,
 		.init = hns3_dbg_common_file_init,
 	},
 	{
@@ -924,6 +924,8 @@ hns3_dbg_dev_specs(struct hnae3_handle *h, char *buf, int len, int *pos)
 			  dev_specs->max_tm_rate);
 	*pos += scnprintf(buf + *pos, len - *pos, "MAX QSET number: %u\n",
 			  dev_specs->max_qset_num);
+	*pos += scnprintf(buf + *pos, len - *pos, "umv size: %u\n",
+			  dev_specs->umv_size);
 }
 
 static int hns3_dbg_dev_info(struct hnae3_handle *h, char *buf, int len)

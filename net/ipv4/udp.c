@@ -317,6 +317,8 @@ found:
 			goto fail_unlock;
 		}
 
+		sock_set_flag(sk, SOCK_RCU_FREE);
+
 		sk_add_node_rcu(sk, &hslot->head);
 		hslot->count++;
 		sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
@@ -333,7 +335,7 @@ found:
 		hslot2->count++;
 		spin_unlock(&hslot2->lock);
 	}
-	sock_set_flag(sk, SOCK_RCU_FREE);
+
 	error = 0;
 fail_unlock:
 	spin_unlock_bh(&hslot->lock);
@@ -398,9 +400,9 @@ static int compute_score(struct sock *sk, struct net *net,
 	return score;
 }
 
-static u32 udp_ehashfn(const struct net *net, const __be32 laddr,
-		       const __u16 lport, const __be32 faddr,
-		       const __be16 fport)
+INDIRECT_CALLABLE_SCOPE
+u32 udp_ehashfn(const struct net *net, const __be32 laddr, const __u16 lport,
+		const __be32 faddr, const __be16 fport)
 {
 	static u32 udp_ehash_secret __read_mostly;
 
@@ -408,22 +410,6 @@ static u32 udp_ehashfn(const struct net *net, const __be32 laddr,
 
 	return __inet_ehashfn(laddr, lport, faddr, fport,
 			      udp_ehash_secret + net_hash_mix(net));
-}
-
-static struct sock *lookup_reuseport(struct net *net, struct sock *sk,
-				     struct sk_buff *skb,
-				     __be32 saddr, __be16 sport,
-				     __be32 daddr, unsigned short hnum)
-{
-	struct sock *reuse_sk = NULL;
-	u32 hash;
-
-	if (sk->sk_reuseport && sk->sk_state != TCP_ESTABLISHED) {
-		hash = udp_ehashfn(net, daddr, hnum, saddr, sport);
-		reuse_sk = reuseport_select_sock(sk, hash, skb,
-						 sizeof(struct udphdr));
-	}
-	return reuse_sk;
 }
 
 /* called with rcu_read_lock() */
@@ -436,15 +422,28 @@ static struct sock *udp4_lib_lookup2(struct net *net,
 {
 	struct sock *sk, *result;
 	int score, badness;
+	bool need_rescore;
 
 	result = NULL;
 	badness = 0;
 	udp_portaddr_for_each_entry_rcu(sk, &hslot2->head) {
-		score = compute_score(sk, net, saddr, sport,
-				      daddr, hnum, dif, sdif);
+		need_rescore = false;
+rescore:
+		score = compute_score(need_rescore ? result : sk, net, saddr,
+				      sport, daddr, hnum, dif, sdif);
 		if (score > badness) {
 			badness = score;
-			result = lookup_reuseport(net, sk, skb, saddr, sport, daddr, hnum);
+
+			if (need_rescore)
+				continue;
+
+			if (sk->sk_state == TCP_ESTABLISHED) {
+				result = sk;
+				continue;
+			}
+
+			result = inet_lookup_reuseport(net, sk, skb, sizeof(struct udphdr),
+						       saddr, sport, daddr, hnum, udp_ehashfn);
 			if (!result) {
 				result = sk;
 				continue;
@@ -458,9 +457,14 @@ static struct sock *udp4_lib_lookup2(struct net *net,
 			if (IS_ERR(result))
 				continue;
 
-			badness = compute_score(result, net, saddr, sport,
-						daddr, hnum, dif, sdif);
-
+			/* compute_score is too long of a function to be
+			 * inlined, and calling it again here yields
+			 * measureable overhead for some
+			 * workloads. Work around it by jumping
+			 * backwards to rescore 'result'.
+			 */
+			need_rescore = true;
+			goto rescore;
 		}
 	}
 	return result;
@@ -483,7 +487,8 @@ static struct sock *udp4_lookup_run_bpf(struct net *net,
 	if (no_reuseport || IS_ERR_OR_NULL(sk))
 		return sk;
 
-	reuse_sk = lookup_reuseport(net, sk, skb, saddr, sport, daddr, hnum);
+	reuse_sk = inet_lookup_reuseport(net, sk, skb, sizeof(struct udphdr),
+					 saddr, sport, daddr, hnum, udp_ehashfn);
 	if (reuse_sk)
 		sk = reuse_sk;
 	return sk;
@@ -601,6 +606,13 @@ static inline bool __udp_is_mcast_sock(struct net *net, struct sock *sk,
 }
 
 DEFINE_STATIC_KEY_FALSE(udp_encap_needed_key);
+EXPORT_SYMBOL(udp_encap_needed_key);
+
+#if IS_ENABLED(CONFIG_IPV6)
+DEFINE_STATIC_KEY_FALSE(udpv6_encap_needed_key);
+EXPORT_SYMBOL(udpv6_encap_needed_key);
+#endif
+
 void udp_encap_enable(void)
 {
 	static_branch_inc(&udp_encap_needed_key);
@@ -925,9 +937,9 @@ static int udp_send_skb(struct sk_buff *skb, struct flowi4 *fl4,
 		const int hlen = skb_network_header_len(skb) +
 				 sizeof(struct udphdr);
 
-		if (hlen + cork->gso_size > cork->fragsize) {
+		if (hlen + min(datalen, cork->gso_size) > cork->fragsize) {
 			kfree_skb(skb);
-			return -EINVAL;
+			return -EMSGSIZE;
 		}
 		if (datalen > cork->gso_size * UDP_MAX_SEGMENTS) {
 			kfree_skb(skb);
@@ -1132,16 +1144,17 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 
 	if (msg->msg_controllen) {
 		err = udp_cmsg_send(sk, msg, &ipc.gso_size);
-		if (err > 0)
+		if (err > 0) {
 			err = ip_cmsg_send(sk, msg, &ipc,
 					   sk->sk_family == AF_INET6);
+			connected = 0;
+		}
 		if (unlikely(err < 0)) {
 			kfree(ipc.opt);
 			return err;
 		}
 		if (ipc.opt)
 			free = 1;
-		connected = 0;
 	}
 	if (!ipc.opt) {
 		struct ip_options_rcu *inet_opt;
@@ -2416,11 +2429,6 @@ static int udp_unicast_rcv_skb(struct sock *sk, struct sk_buff *skb,
  *	All we need to do is get the socket, and then do a checksum.
  */
 
-// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
-#ifdef CONFIG_KNOX_NCM
-#include <net/ncm.h>
-#endif
-// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		   int proto)
 {
@@ -2463,61 +2471,9 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 	if (sk) {
 		struct dst_entry *dst = skb_dst(skb);
 		int ret;
-		// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
-#ifdef CONFIG_KNOX_NCM
-		struct nf_conn *ct = NULL;
-		enum ip_conntrack_info ctinfo;
-		struct nf_conntrack_tuple *tuple = NULL;
-		char srcaddr[INET6_ADDRSTRLEN_NAP];
-		char dstaddr[INET6_ADDRSTRLEN_NAP];
-#endif
-		// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 
 		if (unlikely(rcu_dereference(sk->sk_rx_dst) != dst))
 			udp_sk_rx_dst_set(sk, dst);
-
-		// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
-#ifdef CONFIG_KNOX_NCM
-		/* function to handle open flows with incoming udp packets */
-		if (check_ncm_flag()) {
-			if ( (sk) && (sk->sk_protocol == IPPROTO_UDP) && (SOCK_NPA_VENDOR_DATA_GET(sk) != NULL) ) {
-				ct = nf_ct_get(skb, &ctinfo);
-				if ( (ct) && (NF_CONN_NPA_VENDOR_DATA_GET(ct) != NULL) && (!atomic_read(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->startFlow)) && (!nf_ct_is_dying(ct)) ) {
-					tuple = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
-					if (tuple) {
-						sprintf(srcaddr,"%pI4",(void *)&tuple->src.u3.ip);
-						sprintf(dstaddr,"%pI4",(void *)&tuple->dst.u3.ip);
-						if ( !isIpv4AddressEqualsNull(srcaddr, dstaddr) ) {
-							atomic_set(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->startFlow, 1);
-							if ( check_intermediate_flag() ) {
-								NF_CONN_NPA_VENDOR_DATA_GET(ct)->npa_timeout = ((u32)(jiffies)) + (get_intermediate_timeout() * HZ);
-								atomic_set(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->intermediateFlow, 1);
-							}
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_uid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_uid;
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_pid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_pid;
-							memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->process_name, SOCK_NPA_VENDOR_DATA_GET(sk)->process_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->process_name)-1);
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_puid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_puid;
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_ppid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_ppid;
-							memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name, SOCK_NPA_VENDOR_DATA_GET(sk)->parent_process_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name)-1);
-							memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->domain_name, SOCK_NPA_VENDOR_DATA_GET(sk)->domain_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->domain_name)-1);
-							if ( (skb->dev) ) {
-								memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->interface_name, skb->dev->name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->interface_name)-1);
-							} else {
-								sprintf(NF_CONN_NPA_VENDOR_DATA_GET(ct)->interface_name,"%s","null");
-							}
-							if ( (tuple != NULL) && (ntohs(tuple->dst.u.udp.port) == DNS_PORT_NAP) && (NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_uid == INIT_UID_NAP) && (SOCK_NPA_VENDOR_DATA_GET(sk)->knox_dns_uid > INIT_UID_NAP) ) {
-								NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_puid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_dns_uid;
-								NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_ppid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_dns_pid;
-								memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name, SOCK_NPA_VENDOR_DATA_GET(sk)->dns_process_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name)-1);
-							}
-							knox_collect_conntrack_data(ct, NCM_FLOW_TYPE_OPEN, 3);
-						}	
-					}
-				}
-			}
-		}
-#endif
-		// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 
 		ret = udp_unicast_rcv_skb(sk, skb, uh);
 		if (refcounted)
@@ -2530,58 +2486,8 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 						saddr, daddr, udptable, proto);
 
 	sk = __udp4_lib_lookup_skb(skb, uh->source, uh->dest, udptable);
-	if (sk) {
-		// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
-#ifdef CONFIG_KNOX_NCM
-		struct nf_conn *ct = NULL;
-		enum ip_conntrack_info ctinfo;
-		struct nf_conntrack_tuple *tuple = NULL;
-		char srcaddr[INET6_ADDRSTRLEN_NAP];
-		char dstaddr[INET6_ADDRSTRLEN_NAP];
-
-		/* function to handle open flows with incoming udp packets */
-		if (check_ncm_flag()) {
-			if ( (sk) && (sk->sk_protocol == IPPROTO_UDP) && (SOCK_NPA_VENDOR_DATA_GET(sk) != NULL) ) {
-				ct = nf_ct_get(skb, &ctinfo);
-				if ( (ct) && (NF_CONN_NPA_VENDOR_DATA_GET(ct) != NULL) && (!atomic_read(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->startFlow)) && (!nf_ct_is_dying(ct)) ) {
-					tuple = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
-					if (tuple) {
-						sprintf(srcaddr,"%pI4",(void *)&tuple->src.u3.ip);
-						sprintf(dstaddr,"%pI4",(void *)&tuple->dst.u3.ip);
-						if ( !isIpv4AddressEqualsNull(srcaddr, dstaddr) ) {
-							atomic_set(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->startFlow, 1);
-							if ( check_intermediate_flag() ) {
-								NF_CONN_NPA_VENDOR_DATA_GET(ct)->npa_timeout = ((u32)(jiffies)) + (get_intermediate_timeout() * HZ);
-								atomic_set(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->intermediateFlow, 1);
-							}
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_uid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_uid;
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_pid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_pid;
-							memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->process_name, SOCK_NPA_VENDOR_DATA_GET(sk)->process_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->process_name)-1);
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_puid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_puid;
-							NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_ppid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_ppid;
-							memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name, SOCK_NPA_VENDOR_DATA_GET(sk)->parent_process_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name)-1);
-							memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->domain_name, SOCK_NPA_VENDOR_DATA_GET(sk)->domain_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->domain_name)-1);
-							if ( (skb->dev) ) {
-								memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->interface_name, skb->dev->name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->interface_name)-1);
-							} else {
-								sprintf(NF_CONN_NPA_VENDOR_DATA_GET(ct)->interface_name,"%s","null");
-							}
-							if ( (tuple != NULL) && (ntohs(tuple->dst.u.udp.port) == DNS_PORT_NAP) && (NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_uid == INIT_UID_NAP) && (SOCK_NPA_VENDOR_DATA_GET(sk)->knox_dns_uid > INIT_UID_NAP) ) {
-								NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_puid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_dns_uid;
-								NF_CONN_NPA_VENDOR_DATA_GET(ct)->knox_ppid = SOCK_NPA_VENDOR_DATA_GET(sk)->knox_dns_pid;
-								memcpy(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name, SOCK_NPA_VENDOR_DATA_GET(sk)->dns_process_name, sizeof(NF_CONN_NPA_VENDOR_DATA_GET(ct)->parent_process_name)-1);
-							}
-							knox_collect_conntrack_data(ct, NCM_FLOW_TYPE_OPEN, 3);
-						}	
-					}
-				}
-			}
-		}
-#endif
-		// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
-
+	if (sk)
 		return udp_unicast_rcv_skb(sk, skb, uh);
-	}
 
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
 		goto drop;

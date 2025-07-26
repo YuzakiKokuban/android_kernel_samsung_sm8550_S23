@@ -529,8 +529,11 @@ retry:
 	} else if (fuse_stale_inode(inode, generation, attr)) {
 		/* nodeid was reused, any I/O on the old inode should fail */
 		fuse_make_bad(inode);
-		iput(inode);
-		goto retry;
+		if (inode != d_inode(sb->s_root)) {
+			remove_inode_hash(inode);
+			iput(inode);
+			goto retry;
+		}
 	}
 	fi = get_fuse_inode(inode);
 	spin_lock(&fi->lock);
@@ -806,6 +809,8 @@ static int fuse_parse_param(struct fs_context *fsc, struct fs_parameter *param)
 	struct fs_parse_result result;
 	struct fuse_fs_context *ctx = fsc->fs_private;
 	int opt;
+	kuid_t kuid;
+	kgid_t kgid;
 
 	if (fsc->purpose == FS_CONTEXT_FOR_RECONFIGURE) {
 		/*
@@ -850,16 +855,30 @@ static int fuse_parse_param(struct fs_context *fsc, struct fs_parameter *param)
 		break;
 
 	case OPT_USER_ID:
-		ctx->user_id = make_kuid(fsc->user_ns, result.uint_32);
-		if (!uid_valid(ctx->user_id))
+		kuid =  make_kuid(fsc->user_ns, result.uint_32);
+		if (!uid_valid(kuid))
 			return invalfc(fsc, "Invalid user_id");
+		/*
+		 * The requested uid must be representable in the
+		 * filesystem's idmapping.
+		 */
+		if (!kuid_has_mapping(fsc->user_ns, kuid))
+			return invalfc(fsc, "Invalid user_id");
+		ctx->user_id = kuid;
 		ctx->user_id_present = true;
 		break;
 
 	case OPT_GROUP_ID:
-		ctx->group_id = make_kgid(fsc->user_ns, result.uint_32);
-		if (!gid_valid(ctx->group_id))
+		kgid = make_kgid(fsc->user_ns, result.uint_32);;
+		if (!gid_valid(kgid))
 			return invalfc(fsc, "Invalid group_id");
+		/*
+		 * The requested gid must be representable in the
+		 * filesystem's idmapping.
+		 */
+		if (!kgid_has_mapping(fsc->user_ns, kgid))
+			return invalfc(fsc, "Invalid group_id");
+		ctx->group_id = kgid;
 		ctx->group_id_present = true;
 		break;
 
@@ -1409,8 +1428,6 @@ static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 		fc->conn_error = 1;
 	}
 
-	ST_LOG("<%s> dev = %u:%u  fuse Initialized",
-			__func__, MAJOR(fc->dev), MINOR(fc->dev));
 	fuse_set_initialized(fc);
 	wake_up_all(&fc->blocked_waitq);
 }
@@ -1463,9 +1480,6 @@ void fuse_send_init(struct fuse_mount *fm)
 	ia->args.nocreds = true;
 	ia->args.end = process_init_reply;
 
-	ST_LOG("<%s> dev = %u:%u  fuse send Initrequest",
-			__func__, MAJOR(fm->fc->dev), MINOR(fm->fc->dev));
-
 	if (unlikely(fm->fc->no_daemon) || fuse_simple_background(fm, &ia->args, GFP_KERNEL) != 0)
 		process_init_reply(fm, &ia->args, -ENOTCONN);
 }
@@ -1486,7 +1500,7 @@ void fuse_free_conn(struct fuse_conn *fc)
 	WARN_ON(!list_empty(&fc->devices));
 	idr_for_each(&fc->passthrough_req, free_fuse_passthrough, NULL);
 	idr_destroy(&fc->passthrough_req);
-	kfree_rcu(fc, rcu);
+	kfree(fc);
 }
 EXPORT_SYMBOL_GPL(fuse_free_conn);
 
@@ -1504,15 +1518,14 @@ static int fuse_bdi_init(struct fuse_conn *fc, struct super_block *sb)
 		bdi_put(sb->s_bdi);
 		sb->s_bdi = &noop_backing_dev_info;
 	}
-	/* @fs.sec -- 9b4d962cc783453fc63e4302012c8e28e11e31a5 -- */
-	err = sec_super_setup_bdi_name(sb, "%u:%u%s", MAJOR(fc->dev),
+	err = super_setup_bdi_name(sb, "%u:%u%s", MAJOR(fc->dev),
 				   MINOR(fc->dev), suffix);
 	if (err)
 		return err;
 
 	/* fuse does it's own writeback accounting */
 	sb->s_bdi->capabilities &= ~BDI_CAP_WRITEBACK_ACCT;
-	sb->s_bdi->capabilities |= (BDI_CAP_STRICTLIMIT | BDI_CAP_SEC_DEBUG);
+	sb->s_bdi->capabilities |= BDI_CAP_STRICTLIMIT;
 
 	/*
 	 * For a single fuse filesystem use max 1% of dirty +

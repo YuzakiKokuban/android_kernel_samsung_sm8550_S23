@@ -876,7 +876,7 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 		 * component list.
 		 */
 		if (!soc_find_component(codec)) {
-			dev_err(card->dev,
+			dev_dbg(card->dev,
 				"ASoC: codec component %s not found for link %s\n",
 				codec->name, link->name);
 			return -EPROBE_DEFER;
@@ -901,7 +901,7 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 		 * component list.
 		 */
 		if (!soc_find_component(platform)) {
-			dev_err(card->dev,
+			dev_dbg(card->dev,
 				"ASoC: platform component %s not found for link %s\n",
 				platform->name, link->name);
 			return -EPROBE_DEFER;
@@ -927,7 +927,7 @@ static int soc_dai_link_sanity_check(struct snd_soc_card *card,
 		 */
 		if ((cpu->of_node || cpu->name) &&
 		    !soc_find_component(cpu)) {
-			dev_err(card->dev,
+			dev_dbg(card->dev,
 				"ASoC: cpu component %s not found for link %s\n",
 				cpu->name, link->name);
 			return -EPROBE_DEFER;
@@ -1040,6 +1040,9 @@ int snd_soc_add_pcm_runtime(struct snd_soc_card *card,
 	for_each_link_platforms(dai_link, i, platform) {
 		for_each_component(component) {
 			if (!snd_soc_is_matching_component(platform, component))
+				continue;
+
+			if (snd_soc_component_is_dummy(component) && component->num_dai)
 				continue;
 
 			snd_soc_rtd_add_component(rtd, component);

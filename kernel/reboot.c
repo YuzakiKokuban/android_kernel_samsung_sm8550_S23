@@ -19,6 +19,8 @@
 #include <linux/syscore_ops.h>
 #include <linux/uaccess.h>
 
+#include <trace/hooks/reboot.h>
+
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
  */
@@ -48,9 +50,6 @@ int reboot_default = 1;
 int reboot_cpu;
 enum reboot_type reboot_type = BOOT_ACPI;
 int reboot_force;
-/* @fs.sec -- d1fbf05204832e38d0dd3c9d4c98160a -- */
-// To prevent kernel panic by EIO during shutdown
-int ignore_fs_panic;
 
 /*
  * If set, this is used for preparing the system to power off.
@@ -80,7 +79,6 @@ void kernel_restart_prepare(char *cmd)
 	blocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);
 	system_state = SYSTEM_RESTART;
 	usermodehelper_disable();
-	ignore_fs_panic = 1;
 	device_shutdown();
 }
 
@@ -269,7 +267,6 @@ static void kernel_shutdown_prepare(enum system_states state)
 		(state == SYSTEM_HALT) ? SYS_HALT : SYS_POWER_OFF, NULL);
 	system_state = state;
 	usermodehelper_disable();
-	ignore_fs_panic = 1;
 	device_shutdown();
 }
 /**
@@ -595,6 +592,8 @@ void hw_protection_shutdown(const char *reason, int ms_until_forced)
 	/* Shutdown should be initiated only once. */
 	if (!atomic_dec_and_test(&allow_proceed))
 		return;
+
+	trace_android_rvh_hw_protection_shutdown(reason);
 
 	/*
 	 * Queue a backup emergency shutdown in the event of

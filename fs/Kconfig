@@ -150,7 +150,6 @@ if BLOCK
 menu "DOS/FAT/EXFAT/NT Filesystems"
 
 source "fs/fat/Kconfig"
-source "fs/sdfat/Kconfig"
 source "fs/exfat/Kconfig"
 source "fs/ntfs/Kconfig"
 source "fs/ntfs3/Kconfig"
@@ -342,6 +341,7 @@ config GRACE_PERIOD
 config LOCKD
 	tristate
 	depends on FILE_LOCKING
+	select CRC32
 	select GRACE_PERIOD
 
 config LOCKD_V4

@@ -37,7 +37,6 @@ void bdi_set_owner(struct backing_dev_info *bdi, struct device *owner);
 void bdi_unregister(struct backing_dev_info *bdi);
 
 struct backing_dev_info *bdi_alloc(int node_id);
-struct backing_dev_info *sec_bdi_alloc(int node_id);
 
 void wb_start_background_writeback(struct bdi_writeback *wb);
 void wb_workfn(struct work_struct *work);
@@ -119,7 +118,6 @@ int bdi_set_max_ratio(struct backing_dev_info *bdi, unsigned int max_ratio);
 #define BDI_CAP_WRITEBACK		(1 << 0)
 #define BDI_CAP_WRITEBACK_ACCT		(1 << 1)
 #define BDI_CAP_STRICTLIMIT		(1 << 2)
-#define BDI_CAP_SEC_DEBUG		(1 << 3)
 
 extern struct backing_dev_info noop_backing_dev_info;
 
@@ -285,6 +283,7 @@ static inline struct bdi_writeback *inode_to_wb(const struct inode *inode)
 {
 #ifdef CONFIG_LOCKDEP
 	WARN_ON_ONCE(debug_locks &&
+		     (inode->i_sb->s_iflags & SB_I_CGROUPWB) &&
 		     (!lockdep_is_held(&inode->i_lock) &&
 		      !lockdep_is_held(&inode->i_mapping->i_pages.xa_lock) &&
 		      !lockdep_is_held(&inode->i_wb->list_lock)));

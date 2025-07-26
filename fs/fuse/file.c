@@ -18,7 +18,6 @@
 #include <linux/swap.h>
 #include <linux/falloc.h>
 #include <linux/uio.h>
-#include <linux/sched/mm.h>
 #include <linux/fs.h>
 #include <trace/hooks/tmpfile.h>
 
@@ -274,7 +273,7 @@ int fuse_open_common(struct inode *inode, struct file *file, bool isdir)
 
 	if (dax_truncate) {
 		filemap_invalidate_lock(inode->i_mapping);
-		err = fuse_dax_break_layouts(inode, 0, 0);
+		err = fuse_dax_break_layouts(inode, 0, -1);
 		if (err)
 			goto out_inode_unlock;
 	}
@@ -492,7 +491,7 @@ static void fuse_wait_on_page_writeback(struct inode *inode, pgoff_t index)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
-	fuse_wait_event(fi->page_waitq, !fuse_page_is_writeback(inode, index));
+	wait_event(fi->page_waitq, !fuse_page_is_writeback(inode, index));
 }
 
 /*
@@ -1795,10 +1794,16 @@ __acquires(fi->lock)
 	fuse_writepage_finish(fm, wpa);
 	spin_unlock(&fi->lock);
 
-	/* After fuse_writepage_finish() aux request list is private */
+	/* After rb_erase() aux request list is private */
 	for (aux = wpa->next; aux; aux = next) {
+		struct backing_dev_info *bdi = inode_to_bdi(aux->inode);
+
 		next = aux->next;
 		aux->next = NULL;
+
+		dec_wb_stat(&bdi->wb, WB_WRITEBACK);
+		dec_node_page_state(aux->ia.ap.pages[0], NR_WRITEBACK_TEMP);
+		wb_writeout_inc(&bdi->wb);
 		fuse_writepage_free(aux);
 	}
 
@@ -3109,7 +3114,7 @@ static long fuse_file_fallocate(struct file *file, int mode, loff_t offset,
 	inode_lock(inode);
 	if (block_faults) {
 		filemap_invalidate_lock(inode->i_mapping);
-		err = fuse_dax_break_layouts(inode, 0, 0);
+		err = fuse_dax_break_layouts(inode, 0, -1);
 		if (err)
 			goto out;
 	}

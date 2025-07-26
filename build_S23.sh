@@ -15,7 +15,7 @@ LOCALVERSION_BASE=-android13-Kokuban-Firefly-DYF1-LKM
 
 # 3. LTO (Link Time Optimization)
 # 设置为 "full", "thin" 或 "" (留空以禁用)
-LTO="full"
+LTO="thin"
 
 # 4. 工具链路径
 # 指向你的  工具链的 'prebuilts' 目录

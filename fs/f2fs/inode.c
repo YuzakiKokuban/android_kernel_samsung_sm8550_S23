@@ -10,7 +10,6 @@
 #include <linux/buffer_head.h>
 #include <linux/backing-dev.h>
 #include <linux/writeback.h>
-#include <linux/iversion.h>
 
 #include "f2fs.h"
 #include "node.h"
@@ -28,9 +27,13 @@ void f2fs_mark_inode_dirty_sync(struct inode *inode, bool sync)
 	if (is_inode_flag_set(inode, FI_NEW_INODE))
 		return;
 
-	inode_inc_iversion(inode);
+	if (f2fs_readonly(F2FS_I_SB(inode)->sb))
+		return;
 
 	if (f2fs_inode_dirtied(inode, sync))
+		return;
+
+	if (f2fs_is_atomic_file(inode))
 		return;
 
 	mark_inode_dirty_sync(inode);
@@ -335,6 +338,12 @@ static bool sanity_check_inode(struct inode *inode, struct page *node_page)
 		}
 	}
 
+	if (fi->i_xattr_nid && f2fs_check_nid_range(sbi, fi->i_xattr_nid)) {
+		f2fs_warn(sbi, "%s: inode (ino=%lx) has corrupted i_xattr_nid: %u, run fsck to fix.",
+			  __func__, inode->i_ino, fi->i_xattr_nid);
+		return false;
+	}
+
 	return true;
 }
 
@@ -371,9 +380,6 @@ static int do_read_inode(struct inode *inode)
 	inode->i_ctime.tv_nsec = le32_to_cpu(ri->i_ctime_nsec);
 	inode->i_mtime.tv_nsec = le32_to_cpu(ri->i_mtime_nsec);
 	inode->i_generation = le32_to_cpu(ri->i_generation);
-
-	inode_inc_iversion(inode);
-
 	if (S_ISDIR(inode->i_mode))
 		fi->i_current_depth = le32_to_cpu(ri->i_current_depth);
 	else if (S_ISREG(inode->i_mode))
@@ -478,13 +484,6 @@ static int do_read_inode(struct inode *inode)
 	fi->i_disk_time[1] = inode->i_ctime;
 	fi->i_disk_time[2] = inode->i_mtime;
 	fi->i_disk_time[3] = fi->i_crtime;
-
-	if (unlikely((inode->i_mode & S_IFMT) == 0)) {
-		print_block_data(sbi->sb, inode->i_ino, page_address(node_page),
-				0, F2FS_BLKSIZE);
-		f2fs_bug_on(sbi, 1);
-	}
-
 	f2fs_put_page(node_page, 1);
 
 	stat_inc_inline_xattr(inode);
@@ -754,8 +753,10 @@ int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 		!is_inode_flag_set(inode, FI_DIRTY_INODE))
 		return 0;
 
-	if (!f2fs_is_checkpoint_ready(sbi))
+	if (!f2fs_is_checkpoint_ready(sbi)) {
+		f2fs_mark_inode_dirty_sync(inode, true);
 		return -ENOSPC;
+	}
 
 	/*
 	 * We need to balance fs here to prevent from producing dirty node pages
@@ -776,7 +777,6 @@ void f2fs_evict_inode(struct inode *inode)
 	struct f2fs_inode_info *fi = F2FS_I(inode);
 	nid_t xnid = fi->i_xattr_nid;
 	int err = 0;
-	bool freeze_protected = false;
 
 	f2fs_abort_atomic_write(inode, true);
 
@@ -817,10 +817,8 @@ void f2fs_evict_inode(struct inode *inode)
 	f2fs_remove_ino_entry(sbi, inode->i_ino, UPDATE_INO);
 	f2fs_remove_ino_entry(sbi, inode->i_ino, FLUSH_INO);
 
-	if (!is_sbi_flag_set(sbi, SBI_IS_FREEZING)) {
+	if (!is_sbi_flag_set(sbi, SBI_IS_FREEZING))
 		sb_start_intwrite(inode->i_sb);
-		freeze_protected = true;
-	}
 	set_inode_flag(inode, FI_NO_ALLOC);
 	i_size_write(inode, 0);
 retry:
@@ -865,7 +863,7 @@ retry:
 		if (dquot_initialize_needed(inode))
 			set_sbi_flag(sbi, SBI_QUOTA_NEED_REPAIR);
 	}
-	if (freeze_protected)
+	if (!is_sbi_flag_set(sbi, SBI_IS_FREEZING))
 		sb_end_intwrite(inode->i_sb);
 no_delete:
 	dquot_drop(inode);

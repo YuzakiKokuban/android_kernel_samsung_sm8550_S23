@@ -65,7 +65,6 @@
 #include <linux/vmalloc.h>
 #include <linux/io_uring.h>
 #include <linux/syscall_user_dispatch.h>
-#include <linux/task_integrity.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -77,10 +76,6 @@
 #include <trace/events/sched.h>
 #ifndef __GENKSYMS__
 #include <trace/hooks/sched.h>
-#endif
-
-#ifdef CONFIG_SECURITY_DEFEX
-#include <linux/defex.h>
 #endif
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(task_rename);
@@ -152,13 +147,11 @@ SYSCALL_DEFINE1(uselib, const char __user *, library)
 		goto out;
 
 	/*
-	 * may_open() has already checked for this, so it should be
-	 * impossible to trip now. But we need to be extra cautious
-	 * and check again at the very end too.
+	 * Check do_open_execat() for an explanation.
 	 */
 	error = -EACCES;
-	if (WARN_ON_ONCE(!S_ISREG(file_inode(file)->i_mode) ||
-			 path_noexec(&file->f_path)))
+	if (WARN_ON_ONCE(!S_ISREG(file_inode(file)->i_mode)) ||
+	    path_noexec(&file->f_path))
 		goto exit;
 
 	fsnotify_open(file);
@@ -778,7 +771,8 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	stack_base = calc_max_stack_size(stack_base);
 
 	/* Add space for stack randomization. */
-	stack_base += (STACK_RND_MASK << PAGE_SHIFT);
+	if (current->flags & PF_RANDOMIZE)
+		stack_base += (STACK_RND_MASK << PAGE_SHIFT);
 
 	/* Make sure we didn't let the argument array grow too large. */
 	if (vma->vm_end - vma->vm_start > stack_base)
@@ -903,6 +897,7 @@ int transfer_args_to_stack(struct linux_binprm *bprm,
 			goto out;
 	}
 
+	bprm->exec += *sp_location - MAX_ARG_PAGES * PAGE_SIZE;
 	*sp_location = sp;
 
 out:
@@ -932,16 +927,16 @@ static struct file *do_open_execat(int fd, struct filename *name, int flags)
 
 	file = do_filp_open(fd, name, &open_exec_flags);
 	if (IS_ERR(file))
-		goto out;
+		return file;
 
 	/*
-	 * may_open() has already checked for this, so it should be
-	 * impossible to trip now. But we need to be extra cautious
-	 * and check again at the very end too.
+	 * In the past the regular type check was here. It moved to may_open() in
+	 * 633fb6ac3980 ("exec: move S_ISREG() check earlier"). Since then it is
+	 * an invariant that all non-regular files error out before we get here.
 	 */
 	err = -EACCES;
-	if (WARN_ON_ONCE(!S_ISREG(file_inode(file)->i_mode) ||
-			 path_noexec(&file->f_path)))
+	if (WARN_ON_ONCE(!S_ISREG(file_inode(file)->i_mode)) ||
+	    path_noexec(&file->f_path))
 		goto exit;
 
 	err = deny_write_access(file);
@@ -951,7 +946,6 @@ static struct file *do_open_execat(int fd, struct filename *name, int flags)
 	if (name->name[0] != '\0')
 		fsnotify_open(file);
 
-out:
 	return file;
 
 exit:
@@ -1043,10 +1037,6 @@ static int exec_mmap(struct mm_struct *mm)
 	tsk->mm->vmacache_seqnum = 0;
 	lru_gen_add_mm(mm);
 	vmacache_flush(tsk);
-#ifdef CONFIG_KDP_CRED
-	if (kdp_enable)
-		uh_call(UH_APP_KDP, SET_CRED_PGD, (u64)current_cred(), (u64)mm->pgd, 0, 0);
-#endif
 	task_unlock(tsk);
 	lru_gen_use_mm(mm);
 	if (old_mm) {
@@ -1624,6 +1614,7 @@ static void bprm_fill_uid(struct linux_binprm *bprm, struct file *file)
 	unsigned int mode;
 	kuid_t uid;
 	kgid_t gid;
+	int err;
 
 	if (!mnt_may_suid(file->f_path.mnt))
 		return;
@@ -1641,11 +1632,16 @@ static void bprm_fill_uid(struct linux_binprm *bprm, struct file *file)
 	/* Be careful if suid/sgid is set */
 	inode_lock(inode);
 
-	/* reload atomically mode/uid/gid now that lock held */
+	/* Atomically reload and check mode/uid/gid now that lock held. */
 	mode = inode->i_mode;
 	uid = i_uid_into_mnt(mnt_userns, inode);
 	gid = i_gid_into_mnt(mnt_userns, inode);
+	err = inode_permission(mnt_userns, inode, MAY_EXEC);
 	inode_unlock(inode);
+
+	/* Did the exec bit vanish out from under us? Give up. */
+	if (err)
+		return;
 
 	/* We ignore suid/sgid if there are no mappings for them in the ns */
 	if (!kuid_has_mapping(bprm->cred->user_ns, uid) ||
@@ -1797,8 +1793,6 @@ static int exec_binprm(struct linux_binprm *bprm)
 		if (depth > 5)
 			return -ELOOP;
 
-		five_bprm_check(bprm, depth);
-
 		ret = search_binary_handler(bprm);
 		if (ret < 0)
 			return ret;
@@ -1848,14 +1842,6 @@ static int bprm_execve(struct linux_binprm *bprm,
 	if (IS_ERR(file))
 		goto out_unmark;
 
-#ifdef CONFIG_SECURITY_DEFEX
-	retval = task_defex_enforce(current, file, -__NR_execve, bprm);
-	if (retval < 0) {
-		bprm->file = file;
-		retval = -EPERM;
-		goto out_unmark;
-	 }
-#endif
 	sched_exec();
 
 	bprm->file = file;
@@ -1877,10 +1863,8 @@ static int bprm_execve(struct linux_binprm *bprm,
 		goto out;
 
 	retval = exec_binprm(bprm);
-	if (retval < 0) {
-		task_integrity_delayed_reset(current, CAUSE_EXEC, bprm->file);
+	if (retval < 0)
 		goto out;
-	}
 
 	/* execve succeeded */
 	current->fs->in_exec = 0;
@@ -2129,29 +2113,6 @@ SYSCALL_DEFINE3(execve,
 		const char __user *const __user *, argv,
 		const char __user *const __user *, envp)
 {
-#ifdef CONFIG_KDP_CRED
-	struct filename *path = getname(filename);
-	int error = PTR_ERR(path);
-
-	if (IS_ERR(path))
-		return error;
-
-	if (kdp_enable) {
-		uh_call(UH_APP_KDP, MARK_PPT, (u64)path->name, (u64)current, 0, 0);
-		if (current->cred->uid.val == 0 || current->cred->gid.val == 0 ||
-			current->cred->euid.val == 0 || current->cred->egid.val == 0 ||
-			current->cred->suid.val == 0 || current->cred->sgid.val == 0) {
-			if (kdp_restrict_fork(path)) {
-				pr_warn("RKP_KDP Restricted making process. PID = %d(%s) PPID = %d(%s)\n",
-						current->pid, current->comm,
-						current->parent->pid, current->parent->comm);
-				putname(path);
-				return -EACCES;
-			}
-		}
-	}
-	putname(path);
-#endif
 	return do_execve(getname(filename), argv, envp);
 }
 

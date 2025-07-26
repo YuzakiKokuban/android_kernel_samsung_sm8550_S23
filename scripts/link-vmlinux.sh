@@ -278,7 +278,7 @@ kallsyms_step()
 	vmlinux_link ${kallsyms_vmlinux} "${kallsymso_prev}" ${btf_vmlinux_bin_o}
 	kallsyms ${kallsyms_vmlinux} ${kallsyms_S}
 
-	info AS ${kallsyms_S}
+	info AS ${kallsymso}
 	${CC} ${NOSTDINC_FLAGS} ${LINUXINCLUDE} ${KBUILD_CPPFLAGS} \
 	      ${KBUILD_AFLAGS} ${KBUILD_AFLAGS_KERNEL} \
 	      -c -o ${kallsymso} ${kallsyms_S}
@@ -435,9 +435,3 @@ fi
 
 # For fixdep
 echo "vmlinux: $0" > .vmlinux.d
-
-if [ -n "${CONFIG_CRYPTO_SKC_FIPS}" ]; then
-	echo '  FIPS : Generating hmac of crypto and updating vmlinux... '
-	PYTHONDONTWRITEBYTECODE=0 "${srctree}/scripts/crypto/fips_crypto_integrity.py" \
-		"${objtree}/vmlinux" "${objtree}/crypto" "${objtree}/arch/arm64/crypto"
-fi

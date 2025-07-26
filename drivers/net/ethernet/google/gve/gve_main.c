@@ -201,6 +201,10 @@ static int gve_napi_poll(struct napi_struct *napi, int budget)
 
 	if (block->tx)
 		reschedule |= gve_tx_poll(block, budget);
+
+	if (!budget)
+		return 0;
+
 	if (block->rx)
 		reschedule |= gve_rx_poll(block, budget);
 
@@ -235,6 +239,9 @@ static int gve_napi_poll_dqo(struct napi_struct *napi, int budget)
 
 	if (block->tx)
 		reschedule |= gve_tx_poll_dqo(block, /*do_clean=*/true);
+
+	if (!budget)
+		return 0;
 
 	if (block->rx) {
 		work_done = gve_rx_poll_dqo(block, budget);
@@ -1292,7 +1299,7 @@ void gve_handle_report_stats(struct gve_priv *priv)
 			};
 			stats[stats_idx++] = (struct stats) {
 				.stat_name = cpu_to_be32(RX_BUFFERS_POSTED),
-				.value = cpu_to_be64(priv->rx[0].fill_cnt),
+				.value = cpu_to_be64(priv->rx[idx].fill_cnt),
 				.queue_id = cpu_to_be32(idx),
 			};
 		}

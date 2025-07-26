@@ -101,15 +101,6 @@
 #include <crypto/internal/cipher.h>
 #include <linux/kernel.h>
 
-/*
- * The section is added in accordance with MDFPP requirements.
- * Further, the CONFIG_CRYPTO_SKC_FIPS should be replaced by
- * the MDFPP relevant config.
- */
-#ifdef CONFIG_CRYPTO_SKC_FIPS
-#include "drbg_mdfpp_cast.h"
-#endif
-
 /***************************************************************
  * Backend cipher definitions available to DRBG
  ***************************************************************/
@@ -2121,19 +2112,7 @@ static int __init drbg_init(void)
 		drbg_fill_array(&drbg_algs[i], &drbg_cores[j], 1);
 	for (j = 0; ARRAY_SIZE(drbg_cores) > j; j++, i++)
 		drbg_fill_array(&drbg_algs[i], &drbg_cores[j], 0);
-	ret = crypto_register_rngs(drbg_algs, (ARRAY_SIZE(drbg_cores) * 2));
-
-/*
- * The section is added in accordance with MDFPP requirements.
- * Further, the CONFIG_CRYPTO_SKC_FIPS should be replaced by
- * the MDFPP relevant config.
- */
-#ifdef CONFIG_CRYPTO_SKC_FIPS
-	/* Call CASTs, in case of fail the kernel panic will be initiated. */
-	drbg_mdfpp_cast();
-#endif
-
-	return ret;
+	return crypto_register_rngs(drbg_algs, (ARRAY_SIZE(drbg_cores) * 2));
 }
 
 static void __exit drbg_exit(void)

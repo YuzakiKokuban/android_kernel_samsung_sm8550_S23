@@ -657,19 +657,9 @@ const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode);
 
 static inline struct iommu_fwspec *dev_iommu_fwspec_get(struct device *dev)
 {
-	struct dev_iommu *iommu;
-
-	smp_wmb();
-	iommu = READ_ONCE(dev->iommu);
-
-	if (iommu) {
-		struct iommu_fwspec *fwspec;
-		
-		smp_wmb();
-		fwspec = READ_ONCE(iommu->fwspec);
-
-		return virt_addr_valid(fwspec) ? fwspec : NULL;
-	} else
+	if (dev->iommu)
+		return dev->iommu->fwspec;
+	else
 		return NULL;
 }
 
@@ -1066,7 +1056,7 @@ iommu_aux_get_pasid(struct iommu_domain *domain, struct device *dev)
 static inline struct iommu_sva *
 iommu_sva_bind_device(struct device *dev, struct mm_struct *mm, void *drvdata)
 {
-	return NULL;
+	return ERR_PTR(-ENODEV);
 }
 
 static inline void iommu_sva_unbind_device(struct iommu_sva *handle)

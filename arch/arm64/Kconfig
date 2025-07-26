@@ -836,6 +836,46 @@ config ARM64_ERRATUM_2457168
 
 	  If unsure, say Y.
 
+config ARM64_ERRATUM_3194386
+	bool "Cortex-*/Neoverse-*: workaround for MSR SSBS not self-synchronizing"
+	default y
+	help
+	  This option adds the workaround for the following errata:
+
+	  * ARM Cortex-A76 erratum 3324349
+	  * ARM Cortex-A77 erratum 3324348
+	  * ARM Cortex-A78 erratum 3324344
+	  * ARM Cortex-A78C erratum 3324346
+	  * ARM Cortex-A78C erratum 3324347
+	  * ARM Cortex-A710 erratam 3324338
+	  * ARM Cortex-A715 errartum 3456084
+	  * ARM Cortex-A720 erratum 3456091
+	  * ARM Cortex-A725 erratum 3456106
+	  * ARM Cortex-X1 erratum 3324344
+	  * ARM Cortex-X1C erratum 3324346
+	  * ARM Cortex-X2 erratum 3324338
+	  * ARM Cortex-X3 erratum 3324335
+	  * ARM Cortex-X4 erratum 3194386
+	  * ARM Cortex-X925 erratum 3324334
+	  * ARM Neoverse-N1 erratum 3324349
+	  * ARM Neoverse N2 erratum 3324339
+	  * ARM Neoverse-N3 erratum 3456111
+	  * ARM Neoverse-V1 erratum 3324341
+	  * ARM Neoverse V2 erratum 3324336
+	  * ARM Neoverse-V3 erratum 3312417
+
+	  On affected cores "MSR SSBS, #0" instructions may not affect
+	  subsequent speculative instructions, which may permit unexepected
+	  speculative store bypassing.
+
+	  Work around this problem by placing a Speculation Barrier (SB) or
+	  Instruction Synchronization Barrier (ISB) after kernel changes to
+	  SSBS. The presence of the SSBS special-purpose register is hidden
+	  from hwcaps and EL0 reads of ID_AA64PFR1_EL1, such that userspace
+	  will use the PR_SPEC_STORE_BYPASS prctl to change SSBS.
+
+	  If unsure, say Y.
+
 config CAVIUM_ERRATUM_22375
 	bool "Cavium erratum 22375, 24313"
 	default y
@@ -2110,89 +2150,6 @@ endmenu
 config SYSVIPC_COMPAT
 	def_bool y
 	depends on COMPAT && SYSVIPC
-
-menu "Hypervisor"
-config UH
-	bool "Enable micro hypervisor feature"
-	depends on !SEC_FACTORY
-	default y
-	help
-	  It enables a micro hypervisor.
-	  It's samsung's hypervisor.
-	  RKP and etc can be loaded on it.
-	  please check a memory map for it.
-	  
-config RKP
-	bool "Enable RKP(Realtime Kernel Protection) feature"
-	depends on UH
-	default y
-	help
-	  This solution provides the kernel protection
-	  using a security monitor located within an isolated execution environment.
-	  This isolated execution environment is either the Secure World of ARM TrustZone
-	  or a thin hypervisor that is protected by the hardware virtualization extensions.
-
-config RKP_FIMC_CHECK
-    bool "Enable fimc signing verification"
-    depends on RKP
-    default n
-    help
-      it verifies fimc signing.
-      
-config KDP
-	bool "Enable KDP(Kernel Data Protection) feature"
-	depends on !SEC_VTS_TEST
-	depends on UH
-	default y
-	help
-	  Prevents unauthorized cred modification,
-	  namespace modification, mapping for page table.
-
-config KDP_CRED
-	bool "Enable KDP(Kernel Data Protection) cred feature"
-	depends on !SEC_VTS_TEST
-	depends on UH
-	depends on KDP
-	default y
-	help
-	  Prevents unauthorized cred modification,
-	  namespace modification, mapping for page table.
-
-config KDP_NS
-	bool "Enable KDP(Kernel Data Protection) namespace feature"
-	depends on !SEC_VTS_TEST
-	depends on UH
-	depends on KDP
-	default y
-	help
-	  Prevents unauthorized cred modification,
-	  namespace modification, mapping for page table.
-	  
-config RKP_TEST
-	bool "Enable RKP test"
-	depends on RKP
-	default y
-	help
-	  It is a test feature for RKP debugging.
-	  This configuration checks following lists.
-	  USER_PXN
-	  USER_PGTABLE_RO
-	  KERNEL_PGTABLE_RO
-	  KERNEL_L3PGT_RO
-	  KERNEL_RANGE_RWX
-	  
-config KDP_TEST
-	bool "Enable KDP test"
-	depends on KDP_CRED && KDP_NS
-	default y
-	help
-	  It is a test configuration for KDP debugging.
-	  This configuration checks following lists.
-	  TASK_CRED_RO
-	  TASK_SECURITY_CONTEXT_RO
-	  CRED_MATCH_BACKPOINTERS
-	  SEC_CONTEXT_BACKPOINTER
-endmenu
 
 menu "Power management options"
 

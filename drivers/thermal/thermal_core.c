@@ -29,9 +29,6 @@
 #include "thermal_core.h"
 #include "thermal_hwmon.h"
 
-/* SEC_PM: cooling device state */
-static struct delayed_work cdev_print_work;
-
 static DEFINE_IDA(thermal_tz_ida);
 static DEFINE_IDA(thermal_cdev_ida);
 
@@ -339,7 +336,6 @@ void thermal_zone_device_critical(struct thermal_zone_device *tz)
 
 	dev_emerg(&tz->device, "%s: critical temperature reached, "
 		  "shutting down\n", tz->type);
-	panic("Thermal Critical : %s, %d", tz->type, tz->temperature);
 
 	hw_protection_shutdown("Temperature too high", poweroff_delay_ms);
 }
@@ -1272,6 +1268,7 @@ thermal_zone_device_register(const char *type, int trips, int mask,
 		thermal_zone_destroy_device_groups(tz);
 		goto remove_id;
 	}
+	thermal_zone_device_init(tz);
 	result = device_register(&tz->device);
 	if (result)
 		goto release_device;
@@ -1314,7 +1311,6 @@ thermal_zone_device_register(const char *type, int trips, int mask,
 
 	INIT_DELAYED_WORK(&tz->poll_queue, thermal_zone_device_check);
 
-	thermal_zone_device_init(tz);
 	/* Update the new thermal zone and mark it as already updated. */
 	if (atomic_cmpxchg(&tz->need_update, 1, 0))
 		thermal_zone_device_update(tz, THERMAL_EVENT_UNSPECIFIED);
@@ -1436,36 +1432,6 @@ exit:
 }
 EXPORT_SYMBOL_GPL(thermal_zone_get_zone_by_name);
 
-/* SEC_PM */
-#define BUF_SIZE	SZ_1K
-static void __ref cdev_print(struct work_struct *work)
-{
-	struct thermal_cooling_device *cdev;
-	unsigned long cur_state = 0;
-	int added = 0, ret = 0;
-	char buffer[BUF_SIZE] = { 0, };
-
-	mutex_lock(&thermal_list_lock);
-	list_for_each_entry(cdev, &thermal_cdev_list, node) {
-		if (cdev->ops->get_cur_state)
-			cdev->ops->get_cur_state(cdev, &cur_state);
-
-		if (cur_state) {
-			ret = snprintf(buffer + added, sizeof(buffer) - added,
-					   "[%s:%ld]", cdev->type, cur_state);
-			added += ret;
-
-			if (added >= BUF_SIZE)
-				break;
-		}
-	}
-	mutex_unlock(&thermal_list_lock);
-
-	pr_info("thermal: cdev%s\n", buffer);
-
-	schedule_delayed_work(&cdev_print_work, HZ * 5);
-}
-
 static int thermal_pm_notify(struct notifier_block *nb,
 			     unsigned long mode, void *_unused)
 {
@@ -1476,9 +1442,6 @@ static int thermal_pm_notify(struct notifier_block *nb,
 	case PM_HIBERNATION_PREPARE:
 	case PM_RESTORE_PREPARE:
 	case PM_SUSPEND_PREPARE:
-		/* SEC_PM */
-		cancel_delayed_work(&cdev_print_work);
-
 		atomic_set(&in_suspend, 1);
 		break;
 	case PM_POST_HIBERNATION:
@@ -1493,18 +1456,10 @@ static int thermal_pm_notify(struct notifier_block *nb,
 			if (irq_wakeable)
 				continue;
 
-			/* SEC_PM: to optimize wakeup time */
-			if (tz->polling_delay_jiffies == 0)
-				continue;
-
 			thermal_zone_device_init(tz);
 			thermal_zone_device_update(tz,
 						   THERMAL_EVENT_UNSPECIFIED);
 		}
-
-		/* SEC_PM */
-		schedule_delayed_work(&cdev_print_work, 0);
-
 		break;
 	default:
 		break;
@@ -1540,10 +1495,6 @@ static int __init thermal_init(void)
 	if (result)
 		pr_warn("Thermal: Can not register suspend notifier, return %d\n",
 			result);
-
-	/* SEC_PM */
-	INIT_DELAYED_WORK(&cdev_print_work, cdev_print);
-	schedule_delayed_work(&cdev_print_work, 0);
 
 	return 0;
 

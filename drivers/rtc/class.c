@@ -71,12 +71,6 @@ static void rtc_hctosys(struct rtc_device *rtc)
 		goto err_read;
 	}
 
-	/*
-	 * Force update rtc year time to 2022
-	 * (The release year of device)
-	 */
-	tm.tm_year = 122;
-
 	tv64.tv_sec = rtc_tm_to_time64(&tm);
 
 #if BITS_PER_LONG == 32
@@ -328,7 +322,7 @@ static void rtc_device_get_offset(struct rtc_device *rtc)
 	 *
 	 * Otherwise the offset seconds should be 0.
 	 */
-	if (rtc->start_secs > rtc->range_max ||
+	if ((rtc->start_secs >= 0 && rtc->start_secs > rtc->range_max) ||
 	    rtc->start_secs + range_secs - 1 < rtc->range_min)
 		rtc->offset_secs = rtc->start_secs - rtc->range_min;
 	else if (rtc->start_secs > rtc->range_min)

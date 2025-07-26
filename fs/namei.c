@@ -1226,21 +1226,13 @@ int follow_up(struct path *path)
 		read_sequnlock_excl(&mount_lock);
 		return 0;
 	}
-#ifdef CONFIG_KDP_NS
-	mntget(((struct kdp_mount *)parent)->mnt);
-#else
 	mntget(&parent->mnt);
-#endif
 	mountpoint = dget(mnt->mnt_mountpoint);
 	read_sequnlock_excl(&mount_lock);
 	dput(path->dentry);
 	path->dentry = mountpoint;
 	mntput(path->mnt);
-#ifdef CONFIG_KDP_NS
-	path->mnt = ((struct kdp_mount *)parent)->mnt;
-#else
 	path->mnt = &parent->mnt;
-#endif
 	return 1;
 }
 EXPORT_SYMBOL(follow_up);
@@ -1253,22 +1245,10 @@ static bool choose_mountpoint_rcu(struct mount *m, const struct path *root,
 
 		m = m->mnt_parent;
 		if (unlikely(root->dentry == mountpoint &&
-#ifdef CONFIG_KDP_NS
-			     root->mnt == ((struct kdp_mount *)m)->mnt))
-#else
 			     root->mnt == &m->mnt))
-#endif
 			break;
-#ifdef CONFIG_KDP_NS
-		if (mountpoint != ((struct kdp_mount *)m)->mnt->mnt_root) {
-#else
 		if (mountpoint != m->mnt.mnt_root) {
-#endif
-#ifdef CONFIG_KDP_NS
-			path->mnt = ((struct kdp_mount *)m)->mnt;
-#else
 			path->mnt = &m->mnt;
-#endif
 			path->dentry = mountpoint;
 			*seqp = read_seqcount_begin(&mountpoint->d_seq);
 			return true;
@@ -1471,13 +1451,8 @@ static bool __follow_mount_rcu(struct nameidata *nd, struct path *path,
 		if (flags & DCACHE_MOUNTED) {
 			struct mount *mounted = __lookup_mnt(path->mnt, dentry);
 			if (mounted) {
-#ifdef CONFIG_KDP_NS
-				path->mnt = ((struct kdp_mount *)mounted)->mnt;
-				dentry = path->dentry = ((struct kdp_mount *)mounted)->mnt->mnt_root;
-#else
 				path->mnt = &mounted->mnt;
 				dentry = path->dentry = mounted->mnt.mnt_root;
-#endif
 				nd->state |= ND_JUMPED;
 				*seqp = read_seqcount_begin(&dentry->d_seq);
 				*inode = dentry->d_inode;
@@ -4233,10 +4208,6 @@ retry:
 		goto exit4;
 	mnt_userns = mnt_user_ns(path.mnt);
 	error = vfs_rmdir(mnt_userns, path.dentry->d_inode, dentry);
-#ifdef CONFIG_PROC_DLOG
-	if (!error)
-		dlog_hook_rmdir(dentry, &path);
-#endif
 exit4:
 	dput(dentry);
 exit3:
@@ -4376,10 +4347,6 @@ retry_deleg:
 		mnt_userns = mnt_user_ns(path.mnt);
 		error = vfs_unlink(mnt_userns, path.dentry->d_inode, dentry,
 				   &delegated_inode);
-#ifdef CONFIG_PROC_DLOG
-		if (!error)
-			dlog_hook(dentry, inode, &path);
-#endif
 exit3:
 		dput(dentry);
 	}
@@ -5147,10 +5114,9 @@ const char *vfs_get_link(struct dentry *dentry, struct delayed_call *done)
 EXPORT_SYMBOL(vfs_get_link);
 
 /* get the link contents into pagecache */
-const char *page_get_link(struct dentry *dentry, struct inode *inode,
-			  struct delayed_call *callback)
+static char *__page_get_link(struct dentry *dentry, struct inode *inode,
+			     struct delayed_call *callback)
 {
-	char *kaddr;
 	struct page *page;
 	struct address_space *mapping = inode->i_mapping;
 
@@ -5169,8 +5135,23 @@ const char *page_get_link(struct dentry *dentry, struct inode *inode,
 	}
 	set_delayed_call(callback, page_put_link, page);
 	BUG_ON(mapping_gfp_mask(mapping) & __GFP_HIGHMEM);
-	kaddr = page_address(page);
-	nd_terminate_link(kaddr, inode->i_size, PAGE_SIZE - 1);
+	return page_address(page);
+}
+
+const char *page_get_link_raw(struct dentry *dentry, struct inode *inode,
+			      struct delayed_call *callback)
+{
+	return __page_get_link(dentry, inode, callback);
+}
+EXPORT_SYMBOL_GPL(page_get_link_raw);
+
+const char *page_get_link(struct dentry *dentry, struct inode *inode,
+					struct delayed_call *callback)
+{
+	char *kaddr = __page_get_link(dentry, inode, callback);
+
+	if (!IS_ERR(kaddr))
+		nd_terminate_link(kaddr, inode->i_size, PAGE_SIZE - 1);
 	return kaddr;
 }
 

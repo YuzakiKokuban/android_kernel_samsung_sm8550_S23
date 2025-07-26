@@ -70,8 +70,7 @@ EXPORT_SYMBOL_GPL(dma_contiguous_default_area);
  * Users, who want to set the size of global CMA area for their system
  * should use cma= kernel parameter.
  */
-static const phys_addr_t size_bytes __initconst =
-	(phys_addr_t)CMA_SIZE_MBYTES * SZ_1M;
+#define size_bytes ((phys_addr_t)CMA_SIZE_MBYTES * SZ_1M)
 static phys_addr_t  size_cmdline __initdata = -1;
 static phys_addr_t base_cmdline __initdata;
 static phys_addr_t limit_cmdline __initdata;
@@ -231,21 +230,16 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 {
 	int ret;
 
-	memblock_memsize_disable_tracking();
 	ret = cma_declare_contiguous(base, size, limit, 0, 0, fixed,
 					"reserved", res_cma);
 	if (ret)
-		goto out;
+		return ret;
 
 	/* Architecture specific contiguous memory fixup. */
 	dma_contiguous_early_fixup(cma_get_base(*res_cma),
 				cma_get_size(*res_cma));
 
-	memblock_memsize_record("dma_cma", cma_get_base(*res_cma),
-				cma_get_size(*res_cma), false, true);
-out:
-	memblock_memsize_enable_tracking();
-	return ret;
+	return 0;
 }
 
 /**
@@ -405,8 +399,6 @@ static const struct reserved_mem_ops rmem_cma_ops = {
 
 static int __init rmem_cma_setup(struct reserved_mem *rmem)
 {
-	phys_addr_t align = PAGE_SIZE << max(MAX_ORDER - 1, pageblock_order);
-	phys_addr_t mask = align - 1;
 	unsigned long node = rmem->fdt_node;
 	bool default_cma = of_get_flat_dt_prop(node, "linux,cma-default", NULL);
 	struct cma *cma;
@@ -422,7 +414,7 @@ static int __init rmem_cma_setup(struct reserved_mem *rmem)
 	    of_get_flat_dt_prop(node, "no-map", NULL))
 		return -EINVAL;
 
-	if ((rmem->base & mask) || (rmem->size & mask)) {
+	if (!IS_ALIGNED(rmem->base | rmem->size, CMA_MIN_ALIGNMENT_BYTES)) {
 		pr_err("Reserved memory: incorrect alignment of CMA region\n");
 		return -EINVAL;
 	}

@@ -150,10 +150,8 @@
 #include <linux/poll.h>
 #include <linux/psi.h>
 #include "sched.h"
+
 #include <trace/hooks/psi.h>
-#ifdef CONFIG_PROC_FSLOG
-#include <linux/fslog.h>
-#endif
 
 static int psi_bug __read_mostly;
 
@@ -181,9 +179,6 @@ __setup("psi=", setup_psi);
 #define WINDOW_MIN_US 500000	/* Min window size is 500ms */
 #define WINDOW_MAX_US 10000000	/* Max window size is 10s */
 #define UPDATES_PER_WINDOW 10	/* 10 updates per window */
-
-#define MONITOR_WINDOW_MIN_NS 1000000000 /* 1s */
-#define MONITOR_THRESHOLD_MIN_NS 100000000 /* 100ms */
 
 /* Sampling frequency in nanoseconds */
 static u64 psi_period __read_mostly;
@@ -358,11 +353,6 @@ static void collect_percpu_times(struct psi_group *group,
 	int cpu;
 	int s;
 
-#ifdef CONFIG_PROC_PSI_LOG
-	char buf[1024];
-	int pos = 0;
-#endif
-
 	/*
 	 * Collect the per-cpu time buckets and average them into a
 	 * single time sample that is normalized to wallclock time.
@@ -385,18 +375,7 @@ static void collect_percpu_times(struct psi_group *group,
 
 		for (s = 0; s < PSI_NONIDLE; s++)
 			deltas[s] += (u64)times[s] * nonidle;
-
-#ifdef CONFIG_PROC_PSI_LOG
-		pos += sprintf(buf + pos, "%d,%d,", times[PSI_CPU_SOME] / 1000000,
-				jiffies_to_msecs(nonidle));
-#endif
 	}
-
-#ifdef CONFIG_PROC_PSI_LOG
-	if (aggregator == PSI_POLL) {
-		PSI_LOG("%s", buf);
-	}
-#endif
 
 	/*
 	 * Integrate the sample into the running statistics that are
@@ -600,11 +579,6 @@ static u64 update_triggers(struct psi_group *group, u64 now)
 			continue;
 
 		trace_android_vh_psi_event(t);
-
-		if ((t->win.size >= MONITOR_WINDOW_MIN_NS) &&
-		    (t->threshold >= MONITOR_THRESHOLD_MIN_NS))
-			printk_deferred("psi: %s %lu %lu %d %lu %lu\n", __func__, now,
-			       t->last_event_time, t->state, t->threshold, growth);
 
 		/* Generate an event */
 		if (cmpxchg(&t->event, 0, 1) == 0)

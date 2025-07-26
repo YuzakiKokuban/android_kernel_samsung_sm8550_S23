@@ -406,27 +406,6 @@ static const struct iommu_flush_ops arm_smmu_s2_tlb_ops_v1 = {
 	.tlb_add_page	= arm_smmu_tlb_add_page_s2_v1,
 };
 
-static void debug_camera_faults(struct arm_smmu_domain *smmu_domain,
-		struct arm_smmu_device *smmu, int idx)
-{
-	unsigned long iova;
-	phys_addr_t phys_soft;
-	struct iommu_domain *domain = &smmu_domain->domain;
-
-	if (!strstr(dev_name(smmu_domain->dev), "cam_smmu"))
-		return;
-
-	print_fault_regs(smmu_domain, smmu, idx);
-	iova = arm_smmu_cb_readq(smmu, idx, ARM_SMMU_CB_FAR);
-	phys_soft = arm_smmu_iova_to_phys(domain, iova);
-	dev_err(smmu->dev, "soft iova-to-phys=%llx\n", (u64)phys_soft);
-
-	if (!phys_soft)
-		return;
-
-	arm_smmu_verify_fault(smmu_domain, smmu, idx);
-}
-
 static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 {
 	u32 fsr, fsynr, cbfrsynra;
@@ -444,8 +423,6 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 	fsynr = arm_smmu_cb_read(smmu, idx, ARM_SMMU_CB_FSYNR0);
 	iova = arm_smmu_cb_readq(smmu, idx, ARM_SMMU_CB_FAR);
 	cbfrsynra = arm_smmu_gr1_read(smmu, ARM_SMMU_GR1_CBFRSYNRA(idx));
-
-	debug_camera_faults(smmu_domain, smmu, idx);
 
 	ret = report_iommu_fault(domain, NULL, iova,
 		fsynr & ARM_SMMU_FSYNR0_WNR ? IOMMU_FAULT_WRITE : IOMMU_FAULT_READ);
@@ -1398,6 +1375,17 @@ static struct iommu_device *arm_smmu_probe_device(struct device *dev)
 			goto out_free;
 	} else if (fwspec && fwspec->ops == &arm_smmu_ops) {
 		smmu = arm_smmu_get_by_fwnode(fwspec->iommu_fwnode);
+
+		/*
+		 * Defer probe if the relevant SMMU instance hasn't finished
+		 * probing yet. This is a fragile hack and we'd ideally
+		 * avoid this race in the core code. Until that's ironed
+		 * out, however, this is the most pragmatic option on the
+		 * table.
+		 */
+		if (!smmu)
+			return ERR_PTR(dev_err_probe(dev, -EPROBE_DEFER,
+						"smmu dev has not bound yet\n"));
 	} else {
 		return ERR_PTR(-ENODEV);
 	}

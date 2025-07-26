@@ -98,8 +98,8 @@
 #include <linux/scs.h>
 #include <linux/io_uring.h>
 #include <linux/bpf.h>
+#include <linux/tick.h>
 #include <linux/cpufreq_times.h>
-#include <linux/task_integrity.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -114,21 +114,6 @@
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/sched.h>
-
-#ifdef CONFIG_KDP_CRED
-#include <linux/kdp.h>
-#endif
-
-#ifdef CONFIG_SECURITY_DEFEX
-#include <linux/defex.h>
-#endif
-
-#ifdef CONFIG_PROC_FSLOG
-#include <linux/fslog.h>
-#else
-#define RECLAIMER_LOG(fmt, ...)
-#endif
-
 /*
  * Minimum number of threads to boot the kernel
  */
@@ -1043,10 +1028,6 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #ifdef CONFIG_MEMCG
 	tsk->active_memcg = NULL;
 #endif
-#ifdef CONFIG_TASK_HAS_ALLOC_FREE_STAT
-	tsk->alloc_sum = 0;
-	tsk->free_sum = 0;
-#endif
 #ifdef CONFIG_ANDROID_VENDOR_OEM_DATA
 	memset(&tsk->android_vendor_data1, 0, sizeof(tsk->android_vendor_data1));
 	memset(&tsk->android_oem_data1, 0, sizeof(tsk->android_oem_data1));
@@ -1219,9 +1200,7 @@ void mmput(struct mm_struct *mm)
 
 	if (atomic_dec_and_test(&mm->mm_users)) {
 		trace_android_vh_mmput(mm);
-		RECLAIMER_LOG("UMR: B|last_exit");
 		__mmput(mm);
-		RECLAIMER_LOG("UMR: E|last_exit");
 	}
 }
 EXPORT_SYMBOL_GPL(mmput);
@@ -1625,28 +1604,25 @@ static int copy_fs(unsigned long clone_flags, struct task_struct *tsk)
 static int copy_files(unsigned long clone_flags, struct task_struct *tsk)
 {
 	struct files_struct *oldf, *newf;
-	int error = 0;
 
 	/*
 	 * A background process may not have any files ...
 	 */
 	oldf = current->files;
 	if (!oldf)
-		goto out;
+		return 0;
 
 	if (clone_flags & CLONE_FILES) {
 		atomic_inc(&oldf->count);
-		goto out;
+		return 0;
 	}
 
-	newf = dup_fd(oldf, NR_OPEN_MAX, &error);
-	if (!newf)
-		goto out;
+	newf = dup_fd(oldf, NULL);
+	if (IS_ERR(newf))
+		return PTR_ERR(newf);
 
 	tsk->files = newf;
-	error = 0;
-out:
-	return error;
+	return 0;
 }
 
 static int copy_io(unsigned long clone_flags, struct task_struct *tsk)
@@ -1842,54 +1818,6 @@ init_task_pid(struct task_struct *task, enum pid_type type, struct pid *pid)
 		task->signal->pids[type] = pid;
 }
 
-#ifdef CONFIG_FIVE
-static int dup_task_integrity(unsigned long clone_flags,
-					struct task_struct *tsk)
-{
-	int ret = 0;
-
-	if (clone_flags & CLONE_VM) {
-		task_integrity_get(TASK_INTEGRITY(current));
-		task_integrity_assign(tsk, TASK_INTEGRITY(current));
-	} else {
-		task_integrity_assign(tsk, task_integrity_alloc());
-
-		if (!TASK_INTEGRITY(tsk))
-			ret = -ENOMEM;
-	}
-
-	return ret;
-}
-
-static inline void task_integrity_cleanup(struct task_struct *tsk)
-{
-	task_integrity_put(TASK_INTEGRITY(tsk));
-}
-
-static inline int task_integrity_apply(unsigned long clone_flags,
-						struct task_struct *tsk)
-{
-	int ret = 0;
-	if (!(clone_flags & CLONE_VM))
-		ret = five_fork(current, tsk);
-	return ret;
-}
-#else
-static inline int dup_task_integrity(unsigned long clone_flags,
-						struct task_struct *tsk)
-{
-	return 0;
-}
-static inline void task_integrity_cleanup(struct task_struct *tsk)
-{
-}
-static inline int task_integrity_apply(unsigned long clone_flags,
-						struct task_struct *tsk)
-{
-	return 0;
-}
-#endif
-
 static inline void rcu_copy_process(struct task_struct *p)
 {
 #ifdef CONFIG_PREEMPT_RCU
@@ -2022,6 +1950,91 @@ const struct file_operations pidfd_fops = {
 	.show_fdinfo = pidfd_show_fdinfo,
 #endif
 };
+
+/**
+ * __pidfd_prepare - allocate a new pidfd_file and reserve a pidfd
+ * @pid:   the struct pid for which to create a pidfd
+ * @flags: flags of the new @pidfd
+ * @pidfd: the pidfd to return
+ *
+ * Allocate a new file that stashes @pid and reserve a new pidfd number in the
+ * caller's file descriptor table. The pidfd is reserved but not installed yet.
+
+ * The helper doesn't perform checks on @pid which makes it useful for pidfds
+ * created via CLONE_PIDFD where @pid has no task attached when the pidfd and
+ * pidfd file are prepared.
+ *
+ * If this function returns successfully the caller is responsible to either
+ * call fd_install() passing the returned pidfd and pidfd file as arguments in
+ * order to install the pidfd into its file descriptor table or they must use
+ * put_unused_fd() and fput() on the returned pidfd and pidfd file
+ * respectively.
+ *
+ * This function is useful when a pidfd must already be reserved but there
+ * might still be points of failure afterwards and the caller wants to ensure
+ * that no pidfd is leaked into its file descriptor table.
+ *
+ * Return: On success, a reserved pidfd is returned from the function and a new
+ *         pidfd file is returned in the last argument to the function. On
+ *         error, a negative error code is returned from the function and the
+ *         last argument remains unchanged.
+ */
+static int __pidfd_prepare(struct pid *pid, unsigned int flags, struct file **ret)
+{
+	int pidfd;
+	struct file *pidfd_file;
+
+	if (flags & ~(O_NONBLOCK | O_RDWR | O_CLOEXEC))
+		return -EINVAL;
+
+	pidfd = get_unused_fd_flags(O_RDWR | O_CLOEXEC);
+	if (pidfd < 0)
+		return pidfd;
+
+	pidfd_file = anon_inode_getfile("[pidfd]", &pidfd_fops, pid,
+					flags | O_RDWR | O_CLOEXEC);
+	if (IS_ERR(pidfd_file)) {
+		put_unused_fd(pidfd);
+		return PTR_ERR(pidfd_file);
+	}
+	get_pid(pid); /* held by pidfd_file now */
+	*ret = pidfd_file;
+	return pidfd;
+}
+
+/**
+ * pidfd_prepare - allocate a new pidfd_file and reserve a pidfd
+ * @pid:   the struct pid for which to create a pidfd
+ * @flags: flags of the new @pidfd
+ * @pidfd: the pidfd to return
+ *
+ * Allocate a new file that stashes @pid and reserve a new pidfd number in the
+ * caller's file descriptor table. The pidfd is reserved but not installed yet.
+ *
+ * The helper verifies that @pid is used as a thread group leader.
+ *
+ * If this function returns successfully the caller is responsible to either
+ * call fd_install() passing the returned pidfd and pidfd file as arguments in
+ * order to install the pidfd into its file descriptor table or they must use
+ * put_unused_fd() and fput() on the returned pidfd and pidfd file
+ * respectively.
+ *
+ * This function is useful when a pidfd must already be reserved but there
+ * might still be points of failure afterwards and the caller wants to ensure
+ * that no pidfd is leaked into its file descriptor table.
+ *
+ * Return: On success, a reserved pidfd is returned from the function and a new
+ *         pidfd file is returned in the last argument to the function. On
+ *         error, a negative error code is returned from the function and the
+ *         last argument remains unchanged.
+ */
+int pidfd_prepare(struct pid *pid, unsigned int flags, struct file **ret)
+{
+	if (!pid || !pid_has_task(pid, PIDTYPE_TGID))
+		return -EINVAL;
+
+	return __pidfd_prepare(pid, flags, ret);
+}
 
 static void __delayed_free_task(struct rcu_head *rhp)
 {
@@ -2257,6 +2270,7 @@ static __latent_entropy struct task_struct *copy_process(
 	acct_clear_integrals(p);
 
 	posix_cputimers_init(&p->posix_cputimers);
+	tick_dep_init_task(p);
 
 	p->io_context = NULL;
 	audit_set_context(p, NULL);
@@ -2313,14 +2327,9 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cleanup_perf;
 	/* copy all the process information */
 	shm_init_task(p);
-	retval = dup_task_integrity(clone_flags, p);
+	retval = security_task_alloc(p, clone_flags);
 	if (retval)
 		goto bad_fork_cleanup_audit;
-	retval = security_task_alloc(p, clone_flags);
-	if (retval) {
-		task_integrity_cleanup(p);
-		goto bad_fork_cleanup_audit;
-	}
 	retval = copy_semundo(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_security;
@@ -2366,20 +2375,11 @@ static __latent_entropy struct task_struct *copy_process(
 	 * if the fd table isn't shared).
 	 */
 	if (clone_flags & CLONE_PIDFD) {
-		retval = get_unused_fd_flags(O_RDWR | O_CLOEXEC);
+		/* Note that no task has been attached to @pid yet. */
+		retval = __pidfd_prepare(pid, O_RDWR | O_CLOEXEC, &pidfile);
 		if (retval < 0)
 			goto bad_fork_free_pid;
-
 		pidfd = retval;
-
-		pidfile = anon_inode_getfile("[pidfd]", &pidfd_fops, pid,
-					      O_RDWR | O_CLOEXEC);
-		if (IS_ERR(pidfile)) {
-			put_unused_fd(pidfd);
-			retval = PTR_ERR(pidfile);
-			goto bad_fork_free_pid;
-		}
-		get_pid(pid);	/* held by pidfile now */
 
 		retval = put_user(pidfd, args->pidfd);
 		if (retval)
@@ -2503,10 +2503,6 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cancel_cgroup;
 	}
 
-	retval = task_integrity_apply(clone_flags, p);
-	if (retval)
-		goto bad_fork_cancel_cgroup;
-
 	/* No more failure paths after this point. */
 
 	/*
@@ -2576,10 +2572,6 @@ static __latent_entropy struct task_struct *copy_process(
 
 	copy_oom_score_adj(clone_flags, p);
 
-#ifdef CONFIG_KDP_CRED
-	if (kdp_enable)
-		kdp_assign_pgd(p);
-#endif
 	return p;
 
 bad_fork_cancel_cgroup:
@@ -2759,9 +2751,6 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	pid = get_task_pid(p, PIDTYPE_PID);
 	nr = pid_vnr(pid);
 
-#ifdef CONFIG_SECURITY_DEFEX
-	task_defex_zero_creds(p);
-#endif
 	if (clone_flags & CLONE_PARENT_SETTID)
 		put_user(nr, args->parent_tid);
 
@@ -3177,17 +3166,16 @@ static int unshare_fs(unsigned long unshare_flags, struct fs_struct **new_fsp)
 /*
  * Unshare file descriptor table if it is being shared
  */
-int unshare_fd(unsigned long unshare_flags, unsigned int max_fds,
-	       struct files_struct **new_fdp)
+static int unshare_fd(unsigned long unshare_flags, struct files_struct **new_fdp)
 {
 	struct files_struct *fd = current->files;
-	int error = 0;
 
 	if ((unshare_flags & CLONE_FILES) &&
 	    (fd && atomic_read(&fd->count) > 1)) {
-		*new_fdp = dup_fd(fd, max_fds, &error);
-		if (!*new_fdp)
-			return error;
+		fd = dup_fd(fd, NULL);
+		if (IS_ERR(fd))
+			return PTR_ERR(fd);
+		*new_fdp = fd;
 	}
 
 	return 0;
@@ -3245,7 +3233,7 @@ int ksys_unshare(unsigned long unshare_flags)
 	err = unshare_fs(unshare_flags, &new_fs);
 	if (err)
 		goto bad_unshare_out;
-	err = unshare_fd(unshare_flags, NR_OPEN_MAX, &new_fd);
+	err = unshare_fd(unshare_flags, &new_fd);
 	if (err)
 		goto bad_unshare_cleanup_fs;
 	err = unshare_userns(unshare_flags, &new_cred);
@@ -3340,7 +3328,7 @@ int unshare_files(void)
 	struct files_struct *old, *copy = NULL;
 	int error;
 
-	error = unshare_fd(CLONE_FILES, NR_OPEN_MAX, &copy);
+	error = unshare_fd(CLONE_FILES, &copy);
 	if (error || !copy)
 		return error;
 

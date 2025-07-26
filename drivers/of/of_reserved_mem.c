@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/memblock.h>
 #include <linux/kmemleak.h>
+#include <linux/cma.h>
 
 #include "of_private.h"
 
@@ -49,7 +50,8 @@ static int __init early_init_dt_alloc_reserved_memory_arch(phys_addr_t size,
 			memblock_free(base, size);
 	}
 
-	kmemleak_ignore_phys(base);
+	if (!err)
+		kmemleak_ignore_phys(base);
 
 	return err;
 }
@@ -76,32 +78,6 @@ void __init fdt_reserved_mem_save_node(unsigned long node, const char *uname,
 	return;
 }
 
-#ifdef CONFIG_RBIN
-static phys_addr_t __init get_expand_size(unsigned long node)
-{
-	int len;
-	const __be32 *prop;
-	phys_addr_t size;
-
-	prop = of_get_flat_dt_prop(node, "expand_size", &len);
-	if (!prop)
-		return 0;
-
-	if (len != dt_root_size_cells * sizeof(__be32)) {
-		pr_err("invalid expand_size property in 'rbin' node.\n");
-		return 0;
-	}
-	size = dt_mem_next_cell(dt_root_size_cells, &prop);
-
-	return size;
-}
-static bool __init under_8GB_device(void)
-{
-	phys_addr_t threshold_size = 8UL << 30;
-	return memblock_phys_mem_size() <= threshold_size;
-}
-#endif
-
 /*
  * __reserved_mem_alloc_size() - allocate reserved memory described by
  *	'size', 'alignment'  and 'alloc-ranges' properties.
@@ -127,15 +103,6 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 	}
 	size = dt_mem_next_cell(dt_root_size_cells, &prop);
 
-#ifdef CONFIG_RBIN
-	if (!strncmp(uname, "rbin", 4) && !under_8GB_device()) {
-		phys_addr_t size_temp = get_expand_size(node);
-
-		if (size_temp > 0)
-			size = size_temp;
-	}
-#endif
-
 	prop = of_get_flat_dt_prop(node, "alignment", &len);
 	if (prop) {
 		if (len != dt_root_addr_cells * sizeof(__be32)) {
@@ -152,12 +119,8 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 	if (IS_ENABLED(CONFIG_CMA)
 	    && of_flat_dt_is_compatible(node, "shared-dma-pool")
 	    && of_get_flat_dt_prop(node, "reusable", NULL)
-	    && !nomap) {
-		unsigned long order =
-			max_t(unsigned long, MAX_ORDER - 1, pageblock_order);
-
-		align = max(align, (phys_addr_t)PAGE_SIZE << order);
-	}
+	    && !nomap)
+		align = max_t(phys_addr_t, align, CMA_MIN_ALIGNMENT_BYTES);
 
 	prop = of_get_flat_dt_prop(node, "alloc-ranges", &len);
 	if (prop) {
@@ -300,10 +263,9 @@ void __init fdt_init_reserved_mem(void)
 		int len;
 		const __be32 *prop;
 		int err = 0;
-		bool nomap, nomemsize;
+		bool nomap;
 
 		nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
-		nomemsize = of_get_flat_dt_prop(node, "no-memsize", NULL) != NULL;
 		prop = of_get_flat_dt_prop(node, "phandle", &len);
 		if (!prop)
 			prop = of_get_flat_dt_prop(node, "linux,phandle", &len);
@@ -327,23 +289,11 @@ void __init fdt_init_reserved_mem(void)
 				bool reusable =
 					(of_get_flat_dt_prop(node, "reusable", NULL)) != NULL;
 
-#ifdef CONFIG_RBIN
-				if (!strcmp(rmem->name, "rbin")) {
-					rbin_total = rmem->size >> PAGE_SHIFT;
-					reusable = true;
-				}
-#endif
-
 				pr_info("%pa..%pa (%lu KiB) %s %s %s\n",
 					&rmem->base, &end, (unsigned long)(rmem->size / SZ_1K),
 					nomap ? "nomap" : "map",
 					reusable ? "reusable" : "non-reusable",
 					rmem->name ? rmem->name : "unknown");
-
-				if (!nomemsize)
-					memblock_memsize_record(rmem->name,
-							rmem->base, rmem->size,
-							nomap, reusable);
 			}
 		}
 	}

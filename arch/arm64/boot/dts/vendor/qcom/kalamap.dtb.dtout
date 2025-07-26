@@ -1,0 +1,8 @@
+/home/aden/桌面/Github/SM-S9180_HKTW_15_Opensource/kernel_platform/msm-kernel/arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalama.dtsi:1405.4-1406.26: Warning (reg_format): /soc/remoteproc-spss@1880000/glink-edge:reg: property has invalid length (16 bytes) (#address-cells == 2, #size-cells == 1)
+/home/aden/桌面/Github/SM-S9180_HKTW_15_Opensource/kernel_platform/msm-kernel/arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalama.dtsi:1365.3-10: Warning (ranges_format): /soc/remoteproc-spss@1880000:ranges: empty "ranges" property but its #address-cells (2) differs from /soc (1)
+arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalamap.dtb: Warning (pci_device_reg): Failed prerequisite 'reg_format'
+arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalamap.dtb: Warning (pci_device_bus_num): Failed prerequisite 'reg_format'
+arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalamap.dtb: Warning (i2c_bus_reg): Failed prerequisite 'reg_format'
+arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalamap.dtb: Warning (spi_bus_reg): Failed prerequisite 'reg_format'
+/home/aden/桌面/Github/SM-S9180_HKTW_15_Opensource/kernel_platform/msm-kernel/arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalama.dtsi:1395.14-1412.5: Warning (avoid_default_addr_size): /soc/remoteproc-spss@1880000/glink-edge: Relying on default #address-cells value
+/home/aden/桌面/Github/SM-S9180_HKTW_15_Opensource/kernel_platform/msm-kernel/arch/arm64/boot/dts/samsung/diamond/dm3q/../../../vendor/qcom/kalama.dtsi:1395.14-1412.5: Warning (avoid_default_addr_size): /soc/remoteproc-spss@1880000/glink-edge: Relying on default #size-cells value

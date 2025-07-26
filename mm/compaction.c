@@ -1312,8 +1312,6 @@ static bool suitable_migration_target(struct compact_control_ext *cc_ext,
 							struct page *page)
 {
 	struct compact_control *cc = cc_ext->cc;
-	int mt;
-
 	/* If the page is a large free page, then disallow migration */
 	if (PageBuddy(page)) {
 		/*
@@ -1324,10 +1322,6 @@ static bool suitable_migration_target(struct compact_control_ext *cc_ext,
 		if (buddy_order_unsafe(page) >= pageblock_order)
 			return false;
 	}
-
-	mt = get_pageblock_migratetype(page);
-	if (is_migrate_cma(mt) || is_migrate_isolate(mt))
-		return false;
 
 	if (cc->ignore_block_suitable)
 		return true;
@@ -1400,7 +1394,6 @@ fast_isolate_around(struct compact_control *cc, unsigned long pfn)
 {
 	unsigned long start_pfn, end_pfn;
 	struct page *page;
-	int mt;
 
 	/* Do not search around if there are enough pages already */
 	if (cc->nr_freepages >= cc->nr_migratepages)
@@ -1416,10 +1409,6 @@ fast_isolate_around(struct compact_control *cc, unsigned long pfn)
 
 	page = pageblock_pfn_to_page(start_pfn, end_pfn, cc->zone);
 	if (!page)
-		return;
-
-	mt = get_pageblock_migratetype(page);
-	if (is_migrate_cma(mt) || is_migrate_isolate(mt))
 		return;
 
 	isolate_freepages_block(cc, &start_pfn, end_pfn, &cc->freepages, 1, false);
@@ -2650,16 +2639,11 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
 		unsigned int alloc_flags, const struct alloc_context *ac,
 		enum compact_priority prio, struct page **capture)
 {
-	int may_perform_io = gfp_mask & __GFP_IO;
 	struct zoneref *z;
 	struct zone *zone;
 	enum compact_result rc = COMPACT_SKIPPED;
 
-	/*
-	 * Check if the GFP flags allow compaction - GFP_NOIO is really
-	 * tricky context because the migration might require IO
-	 */
-	if (!may_perform_io)
+	if (!gfp_compaction_allowed(gfp_mask))
 		return COMPACT_SKIPPED;
 
 	trace_mm_compaction_try_to_compact_pages(order, gfp_mask, prio);
@@ -2750,14 +2734,15 @@ static void proactive_compact_node(pg_data_t *pgdat)
 	}
 }
 
-static void __compact_node(int nid, bool sync)
+/* Compact all zones within a node */
+static void compact_node(int nid)
 {
 	pg_data_t *pgdat = NODE_DATA(nid);
 	int zoneid;
 	struct zone *zone;
 	struct compact_control cc = {
 		.order = -1,
-		.mode = sync ? MIGRATE_SYNC : MIGRATE_ASYNC,
+		.mode = MIGRATE_SYNC,
 		.ignore_skip_hint = true,
 		.whole_zone = true,
 		.gfp_mask = GFP_KERNEL,
@@ -2779,26 +2764,8 @@ static void __compact_node(int nid, bool sync)
 	}
 }
 
-#ifdef CONFIG_HUGEPAGE_POOL
-void compact_node_async(void)
-{
-	/* hugepage pool and kzerod assumes there is only one node */
-	__compact_node(0, false);
-}
-#endif
-
-/* Compact all zones within a node */
-static void compact_node(int nid)
-{
-	__compact_node(nid, true);
-}
-
 /* Compact all nodes in the system */
-#ifdef CONFIG_HUGEPAGE_POOL
-void compact_nodes(void)
-#else
 static void compact_nodes(void)
-#endif
 {
 	int nid;
 

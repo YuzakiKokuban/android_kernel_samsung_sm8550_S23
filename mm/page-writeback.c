@@ -426,13 +426,20 @@ static void domain_dirty_limits(struct dirty_throttle_control *dtc)
 	else
 		bg_thresh = (bg_ratio * available_memory) / PAGE_SIZE;
 
-	if (bg_thresh >= thresh)
-		bg_thresh = thresh / 2;
 	tsk = current;
 	if (rt_task(tsk)) {
 		bg_thresh += bg_thresh / 4 + global_wb_domain.dirty_limit / 32;
 		thresh += thresh / 4 + global_wb_domain.dirty_limit / 32;
 	}
+	/*
+	 * Dirty throttling logic assumes the limits in page units fit into
+	 * 32-bits. This gives 16TB dirty limits max which is hopefully enough.
+	 */
+	if (thresh > UINT_MAX)
+		thresh = UINT_MAX;
+	/* This makes sure bg_thresh is within 32-bits as well */
+	if (bg_thresh >= thresh)
+		bg_thresh = thresh / 2;
 	dtc->thresh = thresh;
 	dtc->bg_thresh = bg_thresh;
 
@@ -482,7 +489,11 @@ static unsigned long node_dirty_limit(struct pglist_data *pgdat)
 	if (rt_task(tsk))
 		dirty += dirty / 4;
 
-	return dirty;
+	/*
+	 * Dirty throttling logic assumes the limits in page units fit into
+	 * 32-bits. This gives 16TB dirty limits max which is hopefully enough.
+	 */
+	return min_t(unsigned long, dirty, UINT_MAX);
 }
 
 /**
@@ -518,10 +529,17 @@ int dirty_background_bytes_handler(struct ctl_table *table, int write,
 		void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
+	unsigned long old_bytes = dirty_background_bytes;
 
 	ret = proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
-	if (ret == 0 && write)
+	if (ret == 0 && write) {
+		if (DIV_ROUND_UP(dirty_background_bytes, PAGE_SIZE) >
+								UINT_MAX) {
+			dirty_background_bytes = old_bytes;
+			return -ERANGE;
+		}
 		dirty_background_ratio = 0;
+	}
 	return ret;
 }
 
@@ -533,8 +551,8 @@ int dirty_ratio_handler(struct ctl_table *table, int write, void *buffer,
 
 	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 	if (ret == 0 && write && vm_dirty_ratio != old_ratio) {
-		writeback_set_ratelimit();
 		vm_dirty_bytes = 0;
+		writeback_set_ratelimit();
 	}
 	return ret;
 }
@@ -547,6 +565,10 @@ int dirty_bytes_handler(struct ctl_table *table, int write,
 
 	ret = proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
 	if (ret == 0 && write && vm_dirty_bytes != old_bytes) {
+		if (DIV_ROUND_UP(vm_dirty_bytes, PAGE_SIZE) > UINT_MAX) {
+			vm_dirty_bytes = old_bytes;
+			return -ERANGE;
+		}
 		writeback_set_ratelimit();
 		vm_dirty_ratio = 0;
 	}
@@ -1529,7 +1551,7 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
 	 */
 	dtc->wb_thresh = __wb_calc_thresh(dtc);
 	dtc->wb_bg_thresh = dtc->thresh ?
-		div64_u64(dtc->wb_thresh * dtc->bg_thresh, dtc->thresh) : 0;
+		div_u64((u64)dtc->wb_thresh * dtc->bg_thresh, dtc->thresh) : 0;
 
 	/*
 	 * In order to avoid the stacked BDI deadlock we need
@@ -1548,52 +1570,6 @@ static inline void wb_dirty_limits(struct dirty_throttle_control *dtc)
 		wb_reclaimable = wb_stat(wb, WB_RECLAIMABLE);
 		dtc->wb_dirty = wb_reclaimable + wb_stat(wb, WB_WRITEBACK);
 	}
-}
-
-static inline void bdi_fill_sec_debug_bdp(struct backing_dev_info *bdi,
-		unsigned long start_time,
-		struct dirty_throttle_control *dtc) {
-	struct sec_backing_dev_info *sec_bdi = SEC_BDI(bdi);
-	struct bdi_sec_bdp_dbg *bdp_debug = &sec_bdi->bdp_debug;
-	struct bdi_writeback *wb = dtc->wb;
-	struct inode *inode;
-	unsigned long elapsed_ms = (jiffies - start_time) * 1000 / HZ;
-	unsigned int idx;
-	struct bdi_sec_bdp_entry *entry;
-	unsigned long nr_dirty_inodes_in_timelist = 0; /* # of dirty inodes in b_dirty_time list */
-
-	// fuse bdi balance_dirty_pages debug timeout : 1 sec
-	if (!(bdi->capabilities & BDI_CAP_SEC_DEBUG) || elapsed_ms < 1000)
-		return;
-
-	spin_lock(&wb->list_lock);
-	list_for_each_entry(inode, &wb->b_dirty_time, i_io_list) {
-		if (inode->i_state & I_DIRTY) {
-			spin_lock(&inode->i_lock);
-			if (inode->i_state & I_DIRTY) {
-				nr_dirty_inodes_in_timelist++;
-			}
-			spin_unlock(&inode->i_lock);
-		}
-	}
-	spin_unlock(&wb->list_lock);
-
-	spin_lock(&bdp_debug->lock);
-	idx = bdp_debug->total++ % BDI_BDP_DEBUG_ENTRY;
-	entry = bdp_debug->entry + idx;
-
-	entry->start_time = start_time;
-	entry->elapsed_ms = elapsed_ms;
-	entry->global_thresh = dtc->thresh;
-	entry->global_dirty = dtc->dirty;
-	entry->wb_thresh = dtc->wb_thresh;
-	entry->wb_dirty = dtc->wb_dirty;
-	entry->wb_avg_write_bandwidth = dtc->wb->avg_write_bandwidth;
-	entry->wb_timelist_inodes = nr_dirty_inodes_in_timelist;
-
-	if (bdp_debug->max_entry.elapsed_ms <= elapsed_ms)
-		memcpy(&bdp_debug->max_entry, entry, sizeof(struct bdi_sec_bdp_entry));
-	spin_unlock(&bdp_debug->lock);
 }
 
 /*
@@ -1624,7 +1600,6 @@ static void balance_dirty_pages(struct bdi_writeback *wb,
 	struct backing_dev_info *bdi = wb->bdi;
 	bool strictlimit = bdi->capabilities & BDI_CAP_STRICTLIMIT;
 	unsigned long start_time = jiffies;
-	unsigned long logtime_stamp = jiffies;
 
 	for (;;) {
 		unsigned long now = jiffies;
@@ -1704,7 +1679,6 @@ free_running:
 			if (mdtc)
 				m_intv = dirty_poll_interval(m_dirty, m_thresh);
 			current->nr_dirtied_pause = min(intv, m_intv);
-			bdi_fill_sec_debug_bdp(bdi, start_time, mdtc?mdtc:gdtc);
 			break;
 		}
 
@@ -1819,7 +1793,6 @@ free_running:
 				current->nr_dirtied = 0;
 			} else if (current->nr_dirtied_pause <= pages_dirtied)
 				current->nr_dirtied_pause += pages_dirtied;
-			bdi_fill_sec_debug_bdp(bdi, start_time, sdtc);
 			break;
 		}
 		if (unlikely(pause > max_pause)) {
@@ -1841,34 +1814,6 @@ pause:
 					  period,
 					  pause,
 					  start_time);
-
-		if (bdi->capabilities & BDI_CAP_SEC_DEBUG && pause == max_pause) {
-			unsigned long nr_dirty_inodes_in_timelist = 0; /* # of dirty inodes in b_dirty_time list */
-			struct inode *inode;
-
-			logtime_stamp = jiffies;
-			spin_lock(&wb->list_lock);
-			list_for_each_entry(inode, &wb->b_dirty_time, i_io_list) {
-				if (inode->i_state & I_DIRTY) {
-					spin_lock(&inode->i_lock);
-					if (inode->i_state & I_DIRTY) {
-						nr_dirty_inodes_in_timelist++;
-					}
-					spin_unlock(&inode->i_lock);
-				}
-			}
-			spin_unlock(&wb->list_lock);
-			printk_ratelimited(KERN_WARNING "dev: %s, paused %lu, g-thresh %lu, g-dirty %lu, bdi-thresh %lu, bdi-dirty %lu,"
-				" bdi-bw %lu, timelist_inodes %lu\n",
-				bdi_dev_name(bdi),
-				(unsigned long) (jiffies - start_time) * 1000 / HZ,
-				(unsigned long) sdtc->thresh,
-				(unsigned long) sdtc->dirty,
-				(unsigned long) sdtc->wb_thresh,
-				(unsigned long) sdtc->wb_dirty,
-				(unsigned long) sdtc->wb->avg_write_bandwidth,
-				(unsigned long) nr_dirty_inodes_in_timelist);
-		}
 		__set_current_state(TASK_KILLABLE);
 		wb->dirty_sleep = now;
 		io_schedule_timeout(pause);

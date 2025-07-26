@@ -369,9 +369,7 @@ static int snd_info_text_entry_open(struct inode *inode, struct file *file)
 	struct snd_info_private_data *data;
 	int err;
 
-	if (!mutex_trylock(&info_mutex))
-		return -EAGAIN;
-
+	mutex_lock(&info_mutex);
 	err = alloc_info_private(entry, &data);
 	if (err < 0)
 		goto unlock;

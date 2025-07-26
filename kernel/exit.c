@@ -72,14 +72,6 @@
 #include <trace/hooks/mm.h>
 #include <trace/hooks/dtask.h>
 
-#if defined(CONFIG_MEMORY_ZEROISATION)
-#include <trace/hooks/mz.h>
-#endif
-
-#ifdef CONFIG_SECURITY_DEFEX
-#include <linux/defex.h>
-#endif
-
 /*
  * The default value should be high enough to not crash a system that randomly
  * crashes its kernel from time to time, but low enough to at least not permit
@@ -442,6 +434,8 @@ retry:
 	 * Search through everything else, we should not get here often.
 	 */
 	for_each_process(g) {
+		if (atomic_read(&mm->mm_users) <= 1)
+			break;
 		if (g->flags & PF_KTHREAD)
 			continue;
 		for_each_thread(g, c) {
@@ -560,10 +554,6 @@ static void exit_mm(void)
 	mmput(mm);
 	if (test_thread_flag(TIF_MEMDIE))
 		exit_oom_victim();
-
-#if defined(CONFIG_MEMORY_ZEROISATION)
-	trace_android_vh_mz_exit(current);
-#endif
 }
 
 static struct task_struct *find_alive_thread(struct task_struct *p)
@@ -799,10 +789,6 @@ void __noreturn do_exit(long code)
 	 * Then do everything else.
 	 */
 
-#ifdef CONFIG_SECURITY_DEFEX
-	task_defex_zero_creds(current);
-#endif
-
 	WARN_ON(blk_needs_flush_plug(tsk));
 
 	if (unlikely(in_interrupt()))
@@ -878,6 +864,15 @@ void __noreturn do_exit(long code)
 	tsk->exit_code = code;
 	taskstats_exit(tsk, group_dead);
 
+	/*
+	 * Since sampling can touch ->mm, make sure to stop everything before we
+	 * tear it down.
+	 *
+	 * Also flushes inherited counters to the parent - before the parent
+	 * gets woken up by child-exit notifications.
+	 */
+	perf_event_exit_task(tsk);
+
 	exit_mm();
 
 	if (group_dead)
@@ -893,14 +888,6 @@ void __noreturn do_exit(long code)
 	exit_task_namespaces(tsk);
 	exit_task_work(tsk);
 	exit_thread(tsk);
-
-	/*
-	 * Flush inherited counters to the parent - before the parent
-	 * gets woken up by child-exit notifications.
-	 *
-	 * because of cgroup mode, must be called before cgroup_exit()
-	 */
-	perf_event_exit_task(tsk);
 
 	sched_autogroup_exit_task(tsk);
 	cgroup_exit(tsk);

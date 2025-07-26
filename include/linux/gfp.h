@@ -605,11 +605,6 @@ static inline struct page *alloc_pages_node(int nid, gfp_t gfp_mask,
 	return __alloc_pages_node(nid, gfp_mask, order);
 }
 
-#ifdef CONFIG_KZEROD_ENABLE
-extern struct page *alloc_zeroed_page(void);
-extern unsigned long kzerod_get_zeroed_size(void);
-#endif
-
 #ifdef CONFIG_NUMA
 struct page *alloc_pages(gfp_t gfp, unsigned int order);
 extern struct page *alloc_pages_vma(gfp_t gfp_mask, int order,
@@ -685,6 +680,15 @@ bool gfp_pfmemalloc_allowed(gfp_t gfp_mask);
 
 extern void pm_restrict_gfp_mask(void);
 extern void pm_restore_gfp_mask(void);
+
+/*
+ * Check if the gfp flags allow compaction - GFP_NOIO is a really
+ * tricky context because the migration might require IO.
+ */
+static inline bool gfp_compaction_allowed(gfp_t gfp_mask)
+{
+	return IS_ENABLED(CONFIG_COMPACTION) && (gfp_mask & __GFP_IO);
+}
 
 extern gfp_t vma_thp_gfp_mask(struct vm_area_struct *vma);
 

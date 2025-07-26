@@ -24,11 +24,4 @@
 
 #define COMMAND_LINE_SIZE	2048
 
-/* NOTE: GKI compatible layer for the in-house kernel */
-#define GKI_COMMAND_LINE_SIZE	2048
-
-/* FIXME: use a modified COMMAND_LINE_SIZE for a recovery mode */
-#undef COMMAND_LINE_SIZE
-#define COMMAND_LINE_SIZE	8192
-
 #endif

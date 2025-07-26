@@ -497,10 +497,6 @@ int regulator_check_voltage(struct regulator_dev *rdev,
 
 	if (!regulator_ops_is_valid(rdev, REGULATOR_CHANGE_VOLTAGE)) {
 		rdev_err(rdev, "voltage operation not allowed\n");
-		rdev_err(rdev, "requested %d-%duV, setting %d-%duV, current %duV\n",
-						*min_uV, *max_uV,
-						rdev->constraints->min_uV, rdev->constraints->max_uV,
-						regulator_get_voltage_rdev(rdev));
 		return -EPERM;
 	}
 
@@ -1876,19 +1872,24 @@ static struct regulator *create_regulator(struct regulator_dev *rdev,
 		}
 	}
 
-	if (err != -EEXIST)
+	if (err != -EEXIST) {
 		regulator->debugfs = debugfs_create_dir(supply_name, rdev->debugfs);
-	if (IS_ERR(regulator->debugfs))
-		rdev_dbg(rdev, "Failed to create debugfs directory\n");
+		if (IS_ERR(regulator->debugfs)) {
+			rdev_dbg(rdev, "Failed to create debugfs directory\n");
+			regulator->debugfs = NULL;
+		}
+	}
 
-	debugfs_create_u32("uA_load", 0444, regulator->debugfs,
-			   &regulator->uA_load);
-	debugfs_create_u32("min_uV", 0444, regulator->debugfs,
-			   &regulator->voltage[PM_SUSPEND_ON].min_uV);
-	debugfs_create_u32("max_uV", 0444, regulator->debugfs,
-			   &regulator->voltage[PM_SUSPEND_ON].max_uV);
-	debugfs_create_file("constraint_flags", 0444, regulator->debugfs,
-			    regulator, &constraint_flags_fops);
+	if (regulator->debugfs) {
+		debugfs_create_u32("uA_load", 0444, regulator->debugfs,
+				   &regulator->uA_load);
+		debugfs_create_u32("min_uV", 0444, regulator->debugfs,
+				   &regulator->voltage[PM_SUSPEND_ON].min_uV);
+		debugfs_create_u32("max_uV", 0444, regulator->debugfs,
+				   &regulator->voltage[PM_SUSPEND_ON].max_uV);
+		debugfs_create_file("constraint_flags", 0444, regulator->debugfs,
+				    regulator, &constraint_flags_fops);
+	}
 
 	/*
 	 * Check now if the regulator is an always on regulator - if
@@ -2046,6 +2047,10 @@ static int regulator_resolve_supply(struct regulator_dev *rdev)
 
 		if (have_full_constraints()) {
 			r = dummy_regulator_rdev;
+			if (!r) {
+				ret = -EPROBE_DEFER;
+				goto out;
+			}
 			get_device(&r->dev);
 		} else {
 			dev_err(dev, "Failed to resolve %s-supply for %s\n",
@@ -2063,6 +2068,10 @@ static int regulator_resolve_supply(struct regulator_dev *rdev)
 			goto out;
 		}
 		r = dummy_regulator_rdev;
+		if (!r) {
+			ret = -EPROBE_DEFER;
+			goto out;
+		}
 		get_device(&r->dev);
 	}
 
@@ -2171,8 +2180,10 @@ struct regulator *_regulator_get(struct device *dev, const char *id,
 			 * enabled, even if it isn't hooked up, and just
 			 * provide a dummy.
 			 */
-			dev_warn(dev, "supply %s not found, using dummy regulator\n", id);
 			rdev = dummy_regulator_rdev;
+			if (!rdev)
+				return ERR_PTR(-EPROBE_DEFER);
+			dev_warn(dev, "supply %s not found, using dummy regulator\n", id);
 			get_device(&rdev->dev);
 			break;
 
@@ -3296,6 +3307,7 @@ struct regmap *regulator_get_regmap(struct regulator *regulator)
 
 	return map ? map : ERR_PTR(-EOPNOTSUPP);
 }
+EXPORT_SYMBOL_GPL(regulator_get_regmap);
 
 /**
  * regulator_get_hardware_vsel_register - get the HW voltage selector register
@@ -5700,87 +5712,6 @@ void regulator_unregister(struct regulator_dev *rdev)
 	mutex_unlock(&regulator_list_mutex);
 }
 EXPORT_SYMBOL_GPL(regulator_unregister);
-
-struct rdev_check_data {
-	struct regulator_dev *parent;
-	int level;
-};
-
-static void regulator_show_enabled_subtree(struct regulator_dev *rdev,
-					int level);
-
-static int regulator_show_enabled_children(struct device *dev, void *data)
-{
-	struct regulator_dev *rdev = dev_to_rdev(dev);
-	struct rdev_check_data *check_data = data;
-
-	if (rdev->supply && rdev->supply->rdev == check_data->parent)
-		regulator_show_enabled_subtree(rdev, check_data->level + 1);
-
-	return 0;
-}
-
-static void regulator_show_enabled_subtree(struct regulator_dev *rdev,
-					int level)
-{
-	struct regulation_constraints *c;
-	struct rdev_check_data check_data;
-
-	if (!rdev)
-		return;
-
-	if (rdev->use_count <= 0)
-		goto out;
-
-	if (rdev->constraints->always_on &&
-			rdev->constraints->initial_mode == 1)
-		goto out;
-
-	pr_cont("%*s%-*s %3d %4d %9d",
-		   level * 3 + 1, "",
-		   30 - level * 3, rdev_get_name(rdev),
-		   rdev->use_count, rdev->constraints->initial_mode,
-		   rdev->constraints->always_on);
-
-	c = rdev->constraints;
-	if (c) {
-		switch (rdev->desc->type) {
-		case REGULATOR_VOLTAGE:
-			pr_cont("%5dmV %5dmV\n",
-				   c->min_uV / 1000, c->max_uV / 1000);
-			break;
-		case REGULATOR_CURRENT:
-			pr_cont("%5dmA %5dmA\n",
-				   c->min_uA / 1000, c->max_uA / 1000);
-			break;
-		}
-	}
-out:
-	check_data.level = level;
-	check_data.parent = rdev;
-
-	class_for_each_device(&regulator_class, NULL, &check_data,
-			      regulator_show_enabled_children);
-}
-
-static int _regulator_show_enabled(struct device *dev, void *data)
-{
-	struct regulator_dev *rdev = dev_to_rdev(dev);
-
-	if (!rdev->supply)
-		regulator_show_enabled_subtree(rdev, 0);
-
-	return 0;
-}
-
-int regulator_show_enabled(void)
-{
-	pr_info(" regulator                      use mode always-on     min     max\n");
-	pr_info("------------------------------------------------------------------\n");
-
-	return class_for_each_device(&regulator_class, NULL, NULL,
-				     _regulator_show_enabled);
-}
 
 #ifdef CONFIG_SUSPEND
 /**

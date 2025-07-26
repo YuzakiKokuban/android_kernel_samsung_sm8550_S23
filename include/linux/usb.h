@@ -707,13 +707,12 @@ struct usb_device {
 
 	unsigned long active_duration;
 
-#ifdef CONFIG_PM
 	unsigned long connect_time;
 
 	unsigned do_remote_wakeup:1;
 	unsigned reset_resume:1;
 	unsigned port_is_suspended:1;
-#endif
+
 	struct wusb_dev *wusb_dev;
 	int slot_id;
 	struct usb2_lpm_parameters l1_params;
@@ -2070,19 +2069,6 @@ enum usb_led_event {
 	USB_LED_EVENT_HOST = 0,
 	USB_LED_EVENT_GADGET = 1,
 };
-
-#if IS_ENABLED(CONFIG_USB_HOST_CERTIFICATION)
-/* USB certification */
-enum usb_host_certi_type {
-	USB_HOST_CERTI_UNSUPPORT_ACCESSORY,
-	USB_HOST_CERTI_NO_RESPONSE,
-	USB_HOST_CERTI_HUB_DEPTH_EXCEED,
-	USB_HOST_CERTI_HUB_POWER_EXCEED,
-	USB_HOST_CERTI_HOST_RESOURCE_EXCEED,
-	USB_HOST_CERTI_WARM_RESET
-};
-extern void send_usb_host_certi_uevent(struct device *dev, int usb_certi);
-#endif
 
 #ifdef CONFIG_USB_LED_TRIG
 extern void usb_led_activity(enum usb_led_event ev);

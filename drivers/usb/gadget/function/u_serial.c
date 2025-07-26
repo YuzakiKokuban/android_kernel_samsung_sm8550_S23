@@ -290,8 +290,8 @@ __acquires(&port->port_lock)
 			break;
 	}
 
-	if (do_tty_wake && port->port.tty)
-		tty_wakeup(port->port.tty);
+	if (do_tty_wake)
+		tty_port_tty_wakeup(&port->port);
 	return status;
 }
 
@@ -385,7 +385,7 @@ static void gs_rx_push(struct work_struct *work)
 
 		default:
 			/* presumably a transient fault */
-			pr_debug("ttyGS%d: unexpected RX status %d\n",
+			pr_warn("ttyGS%d: unexpected RX status %d\n",
 				port->port_num, req->status);
 			fallthrough;
 		case 0:
@@ -564,15 +564,18 @@ static int gs_start_io(struct gs_port *port)
 	port->n_read = 0;
 	started = gs_start_rx(port);
 
-	if (started && port->port.tty) {
+	if (started) {
 		gs_start_tx(port);
 		/* Unblock any pending writes into our circular buffer, in case
 		 * we didn't in gs_start_tx() */
-		tty_wakeup(port->port.tty);
+		tty_port_tty_wakeup(&port->port);
 	} else {
-		gs_free_requests(ep, head, &port->read_allocated);
-		gs_free_requests(port->port_usb->in, &port->write_pool,
-			&port->write_allocated);
+		/* Free reqs only if we are still connected */
+		if (port->port_usb) {
+			gs_free_requests(ep, head, &port->read_allocated);
+			gs_free_requests(port->port_usb->in, &port->write_pool,
+				&port->write_allocated);
+		}
 		status = -EIO;
 	}
 
@@ -616,7 +619,7 @@ static int gs_open(struct tty_struct *tty, struct file *file)
 		status = kfifo_alloc(&port->port_write_buf,
 				     WRITE_BUF_SIZE, GFP_KERNEL);
 		if (status) {
-			pr_info("gs_open: ttyGS%d (%p,%p) no buffer\n",
+			pr_debug("gs_open: ttyGS%d (%p,%p) no buffer\n",
 				 port_num, tty, file);
 			goto out;
 		}
@@ -637,18 +640,18 @@ static int gs_open(struct tty_struct *tty, struct file *file)
 		if (!port->suspended) {
 			struct gserial	*gser = port->port_usb;
 
-			pr_info("gs_open: start ttyGS%d\n", port->port_num);
+			pr_debug("gs_open: start ttyGS%d\n", port->port_num);
 			gs_start_io(port);
 
 			if (gser->connect)
 				gser->connect(gser);
 		} else {
-			pr_info("delay start of ttyGS%d\n", port->port_num);
+			pr_debug("delay start of ttyGS%d\n", port->port_num);
 			port->start_delayed = true;
 		}
 	}
 
-	pr_info("gs_open: ttyGS%d (%p,%p)\n", port->port_num, tty, file);
+	pr_debug("gs_open: ttyGS%d (%p,%p)\n", port->port_num, tty, file);
 
 exit_unlock_port:
 	spin_unlock_irq(&port->port_lock);
@@ -1302,8 +1305,6 @@ int gserial_connect(struct gserial *gser, u8 port_num)
 	unsigned long	flags;
 	int		status;
 
-	pr_info("%s +++\n", __func__);
-
 	if (port_num >= MAX_U_SERIAL_PORTS)
 		return -ENXIO;
 
@@ -1344,7 +1345,7 @@ int gserial_connect(struct gserial *gser, u8 port_num)
 	 * protocol about open/close status (connect/disconnect).
 	 */
 	if (port->port.count) {
-		pr_info("gserial_connect: start ttyGS%d\n", port->port_num);
+		pr_debug("gserial_connect: start ttyGS%d\n", port->port_num);
 		gs_start_io(port);
 		if (gser->connect)
 			gser->connect(gser);
@@ -1379,12 +1380,8 @@ void gserial_disconnect(struct gserial *gser)
 	struct gs_port	*port = gser->ioport;
 	unsigned long	flags;
 
-	pr_info("%s +++ \n", __func__);
-
-	if (!port) {
-		pr_err("%s: port is NULL\n", __func__);
+	if (!port)
 		return;
-	}
 
 	spin_lock_irqsave(&serial_port_lock, flags);
 
@@ -1442,6 +1439,7 @@ void gserial_suspend(struct gserial *gser)
 	spin_lock(&port->port_lock);
 	spin_unlock(&serial_port_lock);
 	port->suspended = true;
+	port->start_delayed = true;
 	spin_unlock_irqrestore(&port->port_lock, flags);
 }
 EXPORT_SYMBOL_GPL(gserial_suspend);

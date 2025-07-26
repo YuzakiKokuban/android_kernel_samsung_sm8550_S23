@@ -37,10 +37,6 @@
 #include "internal.h"
 #include <trace/hooks/syscall_check.h>
 
-#ifdef CONFIG_SECURITY_DEFEX
-#include <linux/defex.h>
-#endif
-
 int do_truncate(struct user_namespace *mnt_userns, struct dentry *dentry,
 		loff_t length, unsigned int time_attrs, struct file *filp)
 {
@@ -204,13 +200,13 @@ out:
 	return error;
 }
 
-SYSCALL_DEFINE2(ftruncate, unsigned int, fd, unsigned long, length)
+SYSCALL_DEFINE2(ftruncate, unsigned int, fd, off_t, length)
 {
 	return do_sys_ftruncate(fd, length, 1);
 }
 
 #ifdef CONFIG_COMPAT
-COMPAT_SYSCALL_DEFINE2(ftruncate, unsigned int, fd, compat_ulong_t, length)
+COMPAT_SYSCALL_DEFINE2(ftruncate, unsigned int, fd, compat_off_t, length)
 {
 	return do_sys_ftruncate(fd, length, 1);
 }
@@ -1236,12 +1232,6 @@ static long do_sys_openat2(int dfd, const char __user *filename,
 	fd = get_unused_fd_flags(how->flags);
 	if (fd >= 0) {
 		struct file *f = do_filp_open(dfd, tmp, &op);
-#ifdef CONFIG_SECURITY_DEFEX
-		if (!IS_ERR(f) && task_defex_enforce(current, f, -__NR_openat)) {
-			fput(f);
-			f = ERR_PTR(-EPERM);
-		}
-#endif
 		if (IS_ERR(f)) {
 			put_unused_fd(fd);
 			fd = PTR_ERR(f);
@@ -1287,6 +1277,8 @@ SYSCALL_DEFINE4(openat2, int, dfd, const char __user *, filename,
 
 	if (unlikely(usize < OPEN_HOW_SIZE_VER0))
 		return -EINVAL;
+	if (unlikely(usize > PAGE_SIZE))
+		return -E2BIG;
 
 	err = copy_struct_from_user(&tmp, sizeof(tmp), how, usize);
 	if (err)
