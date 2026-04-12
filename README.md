@@ -10,14 +10,15 @@
 <a href="https://t.me/kokubanchat"><img src="https://img.shields.io/badge/Telegram-交流群-blue.svg?style=for-the-badge&logo=telegram" alt="Telegram"></a>
 </p>
 
-这是一个适用于 **三星 Galaxy S23 系列** 的高性能自定义内核。它旨在提供卓越的稳定性和流畅度，同时集成了最新的 KernelSU 功能，为您带来最佳的玩机体验。
+这是一个适用于 **三星 Galaxy S23 系列** 的高性能自定义内核。它旨在提供卓越的稳定性和流畅度，同时围绕当前仍在维护的 `LKM` 与 `ReSukiSU` 模式，带来更清晰也更稳定的玩机体验。
 
 ## 📌 主要特性
 
 
 * **性能优化**: 针对性的性能调度优化，带来更流畅的日常使用和游戏体验。
 
-* **KernelSU 集成**: 内置多种 KernelSU 版本（包括官方版、MKSU、ReSukiSU），开箱即用。
+* **KernelSU 集成**: 提供精简的构建模式选择，支持纯净 `LKM` 与功能完整的 `ReSukiSU`。
+* **SuSFS / BBG**: 对应构建可按需集成 `SuSFS` 与 `BBG`，其中 `SuSFS` 仅在 `ReSukiSU` 构建中启用。
 
 * **版本信息**: `-android13-Kokuban-Firefly-EYI7`
 
@@ -29,17 +30,11 @@
 
   * **使用方式**: 需要您通过 KernelSU Manager App 手动修补设备的 `init_boot` 分区来实现 Root。
 
-* **KSU (KernelSU)**
-
-  * 内置官方原版 KernelSU，提供最原汁原味的 Root 体验。
-
-* **MKSU (Magic KernelSU)**
-
-  * 内置由 `5ec1cff` 修改的 KernelSU，特性是支持 Magic Mount，可以更方便地挂载模块。
-
 * **ReSuki (ReSukiSU)**
 
   * 内置功能强大的 ReSukiSU，支持 SUSFS 和 KPM 模块，为高级玩家提供更多可玩性。
+
+> 当前项目不再维护旧的内置 `KSU/MKSU` 分支模式。
 
 ## ⚙️ 安装指南
 
@@ -104,13 +99,14 @@ KernelSU-Next 不是 KernelSU 官方开发的，也不是官方认可的改进�
 <a href="https://t.me/kokubanchat"><img src="https://img.shields.io/badge/Telegram-Chat-blue.svg?style=for-the-badge&logo=telegram" alt="Telegram"></a>
 </p>
 
-This is a high-performance custom kernel for the **Samsung Galaxy S23 Series**. It is designed to deliver exceptional stability and smoothness while integrating the latest KernelSU features for the ultimate user experience.
+This is a high-performance custom kernel for the **Samsung Galaxy S23 Series**. It is designed to deliver exceptional stability and smoothness while focusing on the currently maintained `LKM` and `ReSukiSU` modes.
 
 ## 📌 Highlights
 
 * **Performance-Tuned**: Targeted performance and scheduling optimizations for a smoother daily usage and gaming experience.
 
-* **KernelSU Integrated**: Comes with multiple KernelSU variants (Official, MKSU, ReSukiSU) built-in for an out-of-the-box experience.
+* **KernelSU Integrated**: Offers a streamlined build model with clean `LKM` and feature-rich `ReSukiSU` variants.
+* **SuSFS / BBG**: Matching builds can integrate `SuSFS` and `BBG`, with `SuSFS` enabled only for `ReSukiSU` builds.
 
 * **Version Info**: `-android13-Kokuban-Firefly-EYI7`
 
@@ -122,17 +118,11 @@ This is a high-performance custom kernel for the **Samsung Galaxy S23 Series**. 
 
   * **Usage**: Requires you to manually patch your device's `init_boot` partition using the KernelSU Manager App to achieve root.
 
-* **KSU (KernelSU)**
-
-  * Built-in with the official, unmodified KernelSU for the most authentic root experience.
-
-* **MKSU (Magic KernelSU)**
-
-  * Features KernelSU modified by `5ec1cff`, which notably supports Magic Mount for easier module management.
-
 * **ReSuki (ReSukiSU)**
 
   * Integrated with the powerful ReSukiSU, supporting SUSFS and KPM modules, offering advanced features for power users.
+
+> This project no longer maintains the legacy built-in `KSU/MKSU` branch model.
 
 ## ⚙️ Installation Guide
 
