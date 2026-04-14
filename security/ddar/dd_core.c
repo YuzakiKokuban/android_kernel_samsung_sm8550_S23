@@ -971,11 +971,30 @@ static int dd_mmap_available(struct dd_proc *proc)
 	return 1;
 }
 
+static void dd_vm_close(struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct dd_proc *proc = file->private_data;
+
+	if (proc) {
+		proc->control_vma = NULL;
+		proc->metadata_vma = NULL;
+		proc->plaintext_vma = NULL;
+		proc->ciphertext_vma = NULL;
+	}
+}
+
+const struct vm_operations_struct dd_vm_ops = {
+		.close = dd_vm_close,
+};
+
 static int dd_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct dd_proc *proc = filp->private_data;
 	struct dd_context *context = proc->context;
 	unsigned long addr = vma->vm_pgoff << PAGE_SHIFT;
+
+	vma->vm_ops = &dd_vm_ops;
 
 	BUG_ON(!proc);
 	dd_memory("offset:%p\n", (void *)addr);
@@ -2064,6 +2083,7 @@ struct dd_info *alloc_dd_info(struct inode *inode,
 			de = d_find_alias(inode);
 			if (de) {
 				partition_id = fscrypt_ddar_get_storage_type(de);
+				dput(de);
 			}
 
 			cmd = sdp_fs_command_alloc(FSOP_AUDIT_FAIL_DE_ACCESS,

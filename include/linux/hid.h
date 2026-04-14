@@ -841,6 +841,7 @@ extern struct hid_ll_driver i2c_hid_ll_driver;
 extern struct hid_ll_driver hidp_hid_driver;
 extern struct hid_ll_driver uhid_hid_driver;
 extern struct hid_ll_driver usb_hid_driver;
+extern struct hid_ll_driver acc_hid_ll_driver;
 
 static inline bool hid_is_using_ll_driver(struct hid_device *hdev,
 		struct hid_ll_driver *driver)
