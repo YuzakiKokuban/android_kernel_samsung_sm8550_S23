@@ -6427,7 +6427,7 @@ CONFIG_GAF_V6=y
 # CONFIG_MZ_USE_QSEECOM is not set
 CONFIG_DEFAULT_SECURITY_SELINUX=y
 # CONFIG_DEFAULT_SECURITY_DAC is not set
-CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf"
+CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"
 CONFIG_DDAR=y
 # CONFIG_SDP_KEY_DUMP is not set
 CONFIG_KZT=y
