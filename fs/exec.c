@@ -72,6 +72,7 @@
 
 #include <trace/events/task.h>
 #include "internal.h"
+#include <linux/task_integrity.h>
 
 #include <trace/events/sched.h>
 #ifndef __GENKSYMS__
